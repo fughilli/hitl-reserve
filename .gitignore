@@ -1,0 +1,9 @@
+# Bazel convenience symlinks
+/bazel-*
+
+# Go build artifacts
+/hitl
+/hitl-reserved
+
+# Local daemon state
+/state/

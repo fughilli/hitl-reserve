@@ -1,0 +1,4 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/fughilli/hitl-reserve
+gazelle(name = "gazelle")

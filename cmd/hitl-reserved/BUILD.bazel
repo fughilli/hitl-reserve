@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "hitl-reserved_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/fughilli/hitl-reserve/cmd/hitl-reserved",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//api",
+        "//catalog",
+        "//discovery",
+        "//engine",
+        "//metrics",
+        "//runner",
+        "//shared",
+        "//shared/analyzer",
+    ],
+)
+
+go_binary(
+    name = "hitl-reserved",
+    embed = [":hitl-reserved_lib"],
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,128 @@
+{
+  "title": "HITL Reservation Fleet",
+  "uid": "hitl-fleet",
+  "tags": ["hitl", "reservation"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Datasource",
+        "current": {}
+      },
+      {
+        "name": "workspace",
+        "type": "query",
+        "label": "Workspace",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": { "query": "label_values(hitl_up, workspace)", "refId": "workspace" },
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "host",
+        "type": "query",
+        "label": "Host",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": { "query": "label_values(hitl_up{workspace=~\"$workspace\"}, host)", "refId": "host" },
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Rigs up",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [ { "refId": "A", "expr": "count(hitl_up{workspace=~\"$workspace\",host=~\"$host\"})" } ]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Units free",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [ { "refId": "A", "expr": "sum(hitl_units_total{workspace=~\"$workspace\",host=~\"$host\"}) - sum(hitl_units_busy{workspace=~\"$workspace\",host=~\"$host\"})" } ]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Units busy",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [ { "refId": "A", "expr": "sum(hitl_units_busy{workspace=~\"$workspace\",host=~\"$host\"})" } ]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Queued",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 } ] } } },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [ { "refId": "A", "expr": "sum(hitl_queue_depth{workspace=~\"$workspace\",host=~\"$host\"})" } ]
+    },
+    {
+      "id": 5, "type": "stat", "title": "Start failures (1h)",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [ { "refId": "A", "expr": "sum(increase(hitl_start_failures_total{workspace=~\"$workspace\",host=~\"$host\"}[1h]))" } ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Units busy / total (by workspace)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (workspace) (hitl_units_busy{workspace=~\"$workspace\",host=~\"$host\"})", "legendFormat": "{{workspace}} busy" },
+        { "refId": "B", "expr": "sum by (workspace) (hitl_units_total{workspace=~\"$workspace\",host=~\"$host\"})", "legendFormat": "{{workspace}} total" }
+      ]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Queue depth (by host)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [ { "refId": "A", "expr": "hitl_queue_depth{workspace=~\"$workspace\",host=~\"$host\"}", "legendFormat": "{{workspace}}/{{host}}" } ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Reservation throughput (per min)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(hitl_reservations_total{workspace=~\"$workspace\",host=~\"$host\"}[5m])) * 60", "legendFormat": "enqueued" },
+        { "refId": "B", "expr": "sum(rate(hitl_activations_total{workspace=~\"$workspace\",host=~\"$host\"}[5m])) * 60", "legendFormat": "activated" },
+        { "refId": "C", "expr": "sum(rate(hitl_releases_total{workspace=~\"$workspace\",host=~\"$host\"}[5m])) * 60", "legendFormat": "released" }
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Lease expiries & start failures (per min)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(hitl_lease_expirations_total{workspace=~\"$workspace\",host=~\"$host\"}[5m])) * 60", "legendFormat": "lease expiries" },
+        { "refId": "B", "expr": "sum(rate(hitl_start_failures_total{workspace=~\"$workspace\",host=~\"$host\"}[5m])) * 60", "legendFormat": "start failures" }
+      ]
+    },
+    {
+      "id": 10, "type": "state-timeline", "title": "Per-unit occupancy",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [ { "refId": "A", "expr": "hitl_unit_busy{workspace=~\"$workspace\",host=~\"$host\"}", "legendFormat": "{{workspace}}/{{host}}/{{unit}}" } ]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Host temperature (°C)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [ { "refId": "A", "expr": "hitl_host_temperature_celsius{workspace=~\"$workspace\",host=~\"$host\"}", "legendFormat": "{{host}}" } ]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Host load (1m)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [ { "refId": "A", "expr": "hitl_host_load1{workspace=~\"$workspace\",host=~\"$host\"}", "legendFormat": "{{host}}" } ]
+    }
+  ]
+}

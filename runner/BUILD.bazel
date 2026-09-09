@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "runner",
+    srcs = [
+        "podman.go",
+        "runner.go",
+        "usbport.go",
+    ],
+    importpath = "github.com/fughilli/hitl-reserve/runner",
+    visibility = ["//visibility:public"],
+    deps = ["//api"],
+)

@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "catalog",
+    srcs = ["catalog.go"],
+    importpath = "github.com/fughilli/hitl-reserve/catalog",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//runner",
+        "//shared",
+    ],
+)
+
+go_test(
+    name = "catalog_test",
+    srcs = ["catalog_test.go"],
+    embed = [":catalog"],
+    deps = [
+        "//api",
+        "//shared",
+    ],
+)
