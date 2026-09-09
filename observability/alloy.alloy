@@ -1,0 +1,45 @@
+// Grafana Alloy pipeline for a HITL rig: scrape the local reservation daemon (and
+// host metrics) and remote_write to Grafana Cloud. The daemon already labels every
+// series with `host` and `workspace`, so this file is FLEET-IDENTICAL — the same
+// config runs on every rig in every repository. Point several repos' rigs at the
+// same Grafana Cloud tenant and they coexist, distinguished by those labels.
+//
+// Configure via env (seed out-of-band like any secret):
+//   GRAFANA_CLOUD_PROM_URL   - Prometheus remote_write endpoint
+//   GRAFANA_CLOUD_PROM_USER  - numeric instance id / username
+//   GRAFANA_CLOUD_PROM_TOKEN - access-policy token with metrics:write
+
+// Scrape the reservation daemon's /metrics.
+prometheus.scrape "hitl" {
+  targets = [
+    { __address__ = "127.0.0.1:8087", __metrics_path__ = "/metrics" },
+  ]
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+// Optional: host CPU/disk/net via Alloy's built-in Unix collector, in addition to
+// the cpu/mem/temp the daemon reads itself. Labeled with the same host below.
+prometheus.exporter.unix "host" { }
+
+prometheus.scrape "host" {
+  targets         = prometheus.exporter.unix.host.targets
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_PROM_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_PROM_USER")
+      password = sys.env("GRAFANA_CLOUD_PROM_TOKEN")
+    }
+  }
+  // Fallback identity for series that lack them (the daemon's own series already
+  // carry host+workspace; this only tags the host exporter's series).
+  external_labels = {
+    host      = sys.env("HITL_HOST"),
+    workspace = sys.env("HITL_WORKSPACE"),
+  }
+}

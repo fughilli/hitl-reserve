@@ -1,0 +1,93 @@
+{
+  "host": "rig-1",
+  "workspace": "example-lab",
+  "lease_seconds": 1800,
+  "ssh_port_base": 2222,
+
+  "resource_types": {
+    "esp32c6": {
+      "kind": "usb",
+      "capabilities": ["flash", "jtag", "improv", "wss-app", "led-strip"]
+    },
+    "hackrf-one": {
+      "kind": "usb",
+      "capabilities": ["sdr", "rx", "tx", "wideband"]
+    },
+    "led-mapper-pi": {
+      "kind": "network",
+      "capabilities": ["improv", "wss-app", "led-strip", "spi-fpga"]
+    }
+  },
+
+  "shared_resources": [
+    {
+      "name": "logic-analyzer",
+      "kind": "logic-analyzer",
+      "config": { "driver": "fx2lafw", "samplerate": "24m" }
+    }
+  ],
+
+  "components": [
+    {
+      "name": "c6-a",
+      "type": "esp32c6",
+      "devices": ["/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_AA-if00:/dev/ttyACM0"],
+      "env": { "HITL_ADAPTER_SERIAL": "AA" }
+    },
+    {
+      "name": "c6-b",
+      "type": "esp32c6",
+      "devices": ["/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_BB-if00:/dev/ttyACM0"],
+      "env": { "HITL_ADAPTER_SERIAL": "BB" }
+    },
+    {
+      "name": "sdr-a",
+      "type": "hackrf-one"
+    },
+    {
+      "name": "pi-1",
+      "type": "led-mapper-pi",
+      "address": "led-mapper-pi-1.local"
+    }
+  ],
+
+  "units": [
+    {
+      "comment": "Scenario 1 — a single USB board, tapped by the shared logic analyzer.",
+      "name": "c6-a",
+      "type": "esp32c6",
+      "components": ["c6-a"],
+      "shared": [
+        { "resource": "logic-analyzer", "config": { "channels": ["D0"], "protocol": "ws2812" } }
+      ]
+    },
+
+    {
+      "comment": "Scenario 3 — a COMPOSITE unit: an ESP32-C6 wired to a HackRF, reserved together as one atomic unit. Its capabilities are the union of both components.",
+      "name": "c6-b+sdr",
+      "type": "esp32c6+hackrf",
+      "components": ["c6-b", "sdr-a"],
+      "shared": [
+        { "resource": "logic-analyzer", "config": { "channels": ["D1"], "protocol": "ws2812" } }
+      ]
+    },
+
+    {
+      "comment": "Scenario 2 — a network-attached device (a Pi player). pin_only means ordinary caps-only work never drifts onto it; reach it with --unit pi-1 or --type led-mapper-pi.",
+      "name": "pi-1",
+      "type": "led-mapper-pi",
+      "pin_only": true,
+      "components": ["pi-1"]
+    }
+  ],
+
+  "discovery": {
+    "comment": "Optional — auto-detect additional bare ESP32-C6 boards plugged in at runtime and offer each as its own single-board unit.",
+    "enabled": false,
+    "glob": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_*-if00",
+    "type": "esp32c6",
+    "name_prefix": "c6-",
+    "ssh_port_base": 2300,
+    "max": 8
+  }
+}

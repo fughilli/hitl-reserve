@@ -1,0 +1,7 @@
+# The bundled JDK SIGILLs at startup on some aarch64 containers; disable SVE so
+# the Bazel server JVM starts (see the hitl-reserve README / splanc notes).
+startup --host_jvm_args=-XX:UseSVE=0
+
+common --enable_bzlmod
+build --incompatible_strict_action_env
+test --test_output=errors

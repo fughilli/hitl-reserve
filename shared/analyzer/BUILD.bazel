@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "analyzer",
+    srcs = [
+        "analyzer.go",
+        "decode.go",
+        "hw.go",
+    ],
+    importpath = "github.com/fughilli/hitl-reserve/shared/analyzer",
+    visibility = ["//visibility:public"],
+    deps = ["//api"],
+)
+
+go_test(
+    name = "analyzer_test",
+    srcs = ["analyzer_test.go"],
+    embed = [":analyzer"],
+)

@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "discovery",
+    srcs = ["discovery.go"],
+    importpath = "github.com/fughilli/hitl-reserve/discovery",
+    visibility = ["//visibility:public"],
+    deps = ["//runner"],
+)
