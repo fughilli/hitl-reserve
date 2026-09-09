@@ -13,7 +13,10 @@ go_library(
 
 go_test(
     name = "engine_test",
-    srcs = ["engine_test.go"],
+    srcs = [
+        "engine_test.go",
+        "provision_test.go",
+    ],
     embed = [":engine"],
     deps = [
         "//api",

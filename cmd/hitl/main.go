@@ -221,6 +221,9 @@ func cmdStatus(args []string) error {
 		for _, s := range st.Shared {
 			fmt.Printf("  [shared] %s kind=%s present=%v\n", s.Name, s.Kind, s.Present)
 		}
+		if st.Provisioning != nil {
+			fmt.Printf("  [provisioning] ssid=%s psk=%s\n", st.Provisioning.SSID, st.Provisioning.PSK)
+		}
 	}
 	return nil
 }

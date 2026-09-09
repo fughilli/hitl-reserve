@@ -16,6 +16,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/fughilli/hitl-reserve/api"
 	"github.com/fughilli/hitl-reserve/runner"
 	"github.com/fughilli/hitl-reserve/shared"
 )
@@ -28,6 +29,9 @@ type Catalog struct {
 	// Workspace is a logical grouping (repo/fleet) surfaced in status + metrics so
 	// several projects' hosts can share one dashboard.
 	Workspace string `json:"workspace,omitempty"`
+	// Provisioning, if set, advertises an onboarding network in /status (see
+	// api.ProvisioningNetwork) so holders can provision DUTs with no OOB creds.
+	Provisioning *api.ProvisioningNetwork `json:"provisioning_network,omitempty"`
 	// LeaseSeconds is the heartbeat lease window (default 1800).
 	LeaseSeconds int `json:"lease_seconds,omitempty"`
 	// SSHPortBase is where auto-assigned unit sshd ports start (default 2222). A
@@ -110,6 +114,7 @@ type Resolved struct {
 	Units        []runner.Unit
 	Registry     *shared.Registry
 	Discovery    *json.RawMessage
+	Provisioning *api.ProvisioningNetwork
 }
 
 // Load reads and parses a catalog JSON file.
@@ -269,6 +274,7 @@ func (c *Catalog) Resolve(factories map[string]BrokerFactory) (*Resolved, error)
 	return &Resolved{
 		Host: host, Workspace: c.Workspace, LeaseSeconds: lease,
 		Units: units, Registry: reg, Discovery: c.Discovery,
+		Provisioning: c.Provisioning,
 	}, nil
 }
 

@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "discovery",
@@ -6,4 +6,10 @@ go_library(
     importpath = "github.com/fughilli/hitl-reserve/discovery",
     visibility = ["//visibility:public"],
     deps = ["//runner"],
+)
+
+go_test(
+    name = "discovery_test",
+    srcs = ["discovery_test.go"],
+    embed = [":discovery"],
 )

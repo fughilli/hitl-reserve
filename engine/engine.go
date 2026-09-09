@@ -45,6 +45,7 @@ type Manager struct {
 	run       runner.Runner
 	units     []runner.Unit
 	shared    []api.SharedResourceInfo // advertised in Status (refreshable)
+	provision *api.ProvisioningNetwork // advertised in Status (or nil)
 	hook      Hook
 
 	mu    sync.Mutex
@@ -66,9 +67,17 @@ type Manager struct {
 type Option func(*Manager)
 
 // WithUnits sets the units this host hands out. Order is the tie-break when
-// several are free. If unset, the host runs a single unnamed unit.
+// several are free. A host may legitimately start with zero units and gain them
+// at runtime (via discovery / seeding through SyncUnits).
 func WithUnits(units []runner.Unit) Option {
 	return func(m *Manager) { m.units = append([]runner.Unit(nil), units...) }
+}
+
+// WithProvisioningNetwork advertises an onboarding network in Status (see
+// api.ProvisioningNetwork), so a holder can provision a DUT onto it with no
+// out-of-band credentials.
+func WithProvisioningNetwork(p *api.ProvisioningNetwork) Option {
+	return func(m *Manager) { m.provision = p }
 }
 
 // WithWorkspace tags the host with a logical grouping (repo/fleet name), surfaced
@@ -94,9 +103,6 @@ func New(host string, lease time.Duration, run runner.Runner, opts ...Option) *M
 	}
 	for _, o := range opts {
 		o(m)
-	}
-	if len(m.units) == 0 {
-		m.units = []runner.Unit{{Name: "unit0"}}
 	}
 	return m
 }
@@ -311,6 +317,7 @@ func (m *Manager) Status() api.Status {
 		Workspace:    m.workspace,
 		LeaseSeconds: int(m.lease.Seconds()),
 		Shared:       m.shared,
+		Provisioning: m.provision,
 	}
 	holders := map[string]*api.Reservation{}
 	for _, r := range m.items {
