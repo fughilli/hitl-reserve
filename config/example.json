@@ -4,6 +4,8 @@
   "lease_seconds": 1800,
   "ssh_port_base": 2222,
 
+  "provisioning_network": { "ssid": "rig-1", "psk": "rig-1-provision" },
+
   "resource_types": {
     "esp32c6": {
       "kind": "usb",
@@ -88,6 +90,7 @@
     "type": "esp32c6",
     "name_prefix": "c6-",
     "ssh_port_base": 2300,
-    "max": 8
+    "max": 8,
+    "seeded_file": "/var/lib/hitl/seeded-units.json"
   }
 }

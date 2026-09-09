@@ -50,6 +50,8 @@ func main() {
 	privileged := flag.Bool("privileged", false, "run environments privileged (leaks all host /dev; avoid on multi-unit hosts)")
 	rawUSB := flag.Bool("raw-usb", true, "give environments raw USB access, isolated per unit")
 	brokerURL := flag.String("broker-url", "http://host.containers.internal:8087", "base URL environments use to reach this daemon's shared-resource brokers ($HITL_BROKER_URL)")
+	provSSID := flag.String("provisioning-ssid", "", "advertise this onboarding-network SSID in /status (overrides the catalog); e.g. a per-host provisioning AP")
+	provPSK := flag.String("provisioning-psk", "", "onboarding-network passphrase advertised alongside --provisioning-ssid")
 	flag.Parse()
 
 	if *catalogPath == "" {
@@ -86,6 +88,13 @@ func main() {
 		lease = *leaseFlag
 	}
 
+	// Provisioning network: catalog value, overridden by flags (a per-host SSID —
+	// e.g. one derived from the hostname — can't live in a fleet-shared catalog).
+	provision := res.Provisioning
+	if *provSSID != "" {
+		provision = &api.ProvisioningNetwork{SSID: *provSSID, PSK: *provPSK}
+	}
+
 	run := runner.NewPodman(runner.PodmanConfig{
 		Image:      *image,
 		Host:       host,
@@ -108,6 +117,7 @@ func main() {
 		engine.WithUnits(res.Units),
 		engine.WithWorkspace(ws),
 		engine.WithSharedResources(res.Registry.Describe()),
+		engine.WithProvisioningNetwork(provision),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

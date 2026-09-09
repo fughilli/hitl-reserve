@@ -124,15 +124,28 @@ type SharedResourceInfo struct {
 	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
+// ProvisioningNetwork advertises a network a client can onboard a device-under-test
+// onto without any out-of-band credentials — e.g. a host that runs a WiFi access
+// point which DUTs are provisioned onto (over BLE/Improv or similar) so the host
+// can then reach them. Advertised in Status; nil when the host runs none. The
+// credential is returned deliberately: the reservation transport (a trusted
+// network) is the security boundary, so a holder needs the PSK to drive
+// provisioning, the same posture as the reservation SSH key.
+type ProvisioningNetwork struct {
+	SSID string `json:"ssid"`
+	PSK  string `json:"psk,omitempty"`
+}
+
 // Status is the daemon's overall view of a host.
 type Status struct {
-	Host         string               `json:"host"`                // host name
-	Workspace    string               `json:"workspace,omitempty"` // logical fleet/repo grouping (observability)
-	Units        []UnitStatus         `json:"units"`               // every reservable unit and its holder
-	Shared       []SharedResourceInfo `json:"shared,omitempty"`    // host-level shared resources
-	LeaseSeconds int                  `json:"lease_seconds"`       // heartbeat lease window
-	FreeUnits    int                  `json:"free_units"`          // units immediately available
-	QueueLength  int                  `json:"queue_length"`        // waiters not yet assigned a unit
+	Host         string               `json:"host"`                   // host name
+	Workspace    string               `json:"workspace,omitempty"`    // logical fleet/repo grouping (observability)
+	Units        []UnitStatus         `json:"units"`                  // every reservable unit and its holder
+	Shared       []SharedResourceInfo `json:"shared,omitempty"`       // host-level shared resources
+	Provisioning *ProvisioningNetwork `json:"provisioning,omitempty"` // onboarding network the host advertises, if any
+	LeaseSeconds int                  `json:"lease_seconds"`          // heartbeat lease window
+	FreeUnits    int                  `json:"free_units"`             // units immediately available
+	QueueLength  int                  `json:"queue_length"`           // waiters not yet assigned a unit
 }
 
 // Error is the JSON error envelope for non-2xx responses.

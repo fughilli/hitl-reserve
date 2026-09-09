@@ -6,6 +6,7 @@ go_library(
     importpath = "github.com/fughilli/hitl-reserve/catalog",
     visibility = ["//visibility:public"],
     deps = [
+        "//api",
         "//runner",
         "//shared",
     ],
