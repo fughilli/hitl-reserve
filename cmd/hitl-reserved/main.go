@@ -35,6 +35,15 @@ import (
 	"github.com/fughilli/hitl-reserve/shared/analyzer"
 )
 
+// stringList collects a repeatable string flag.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
 func main() {
 	hostname, _ := os.Hostname()
 
@@ -52,6 +61,8 @@ func main() {
 	brokerURL := flag.String("broker-url", "http://host.containers.internal:8087", "base URL environments use to reach this daemon's shared-resource brokers ($HITL_BROKER_URL)")
 	provSSID := flag.String("provisioning-ssid", "", "advertise this onboarding-network SSID in /status (overrides the catalog); e.g. a per-host provisioning AP")
 	provPSK := flag.String("provisioning-psk", "", "onboarding-network passphrase advertised alongside --provisioning-ssid")
+	var mounts stringList
+	flag.Var(&mounts, "mount", "extra bind mount for every reservation environment, 'host[:container][:opts]' (repeatable). A host path that doesn't exist at start is skipped, so an optional host resource (e.g. a dbus socket) never breaks a rig that lacks it.")
 	flag.Parse()
 
 	if *catalogPath == "" {
@@ -104,6 +115,7 @@ func main() {
 		Privileged: *privileged,
 		RawUSB:     *rawUSB,
 		ExtraEnv:   map[string]string{"HITL_BROKER_URL": *brokerURL},
+		Mounts:     mounts,
 	})
 
 	for _, u := range res.Units {
