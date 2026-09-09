@@ -122,6 +122,16 @@ func (p *PodmanRunner) Start(ctx context.Context, id, owner, sshKey string, unit
 		args = append(args, "-e", k+"="+p.cfg.ExtraEnv[k])
 	}
 	for _, m := range p.cfg.Mounts {
+		// Skip a bind mount whose absolute host path doesn't exist, so an OPTIONAL
+		// host resource (e.g. a dbus socket for BLE) never breaks a rig that lacks it
+		// — podman -v would otherwise auto-create an empty dir at the host path and
+		// mount that. Named volumes / relative sources (no leading '/') pass through.
+		if host := mountHostPath(m); host != "" {
+			if _, err := os.Stat(host); err != nil {
+				log.Printf("podman: mount host path %q absent; skipping -v %s", host, m)
+				continue
+			}
+		}
 		args = append(args, "-v", m)
 	}
 
@@ -384,6 +394,20 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// mountHostPath returns the host (source) path of a "-v" bind spec
+// "host[:container[:opts]]" when it's an absolute path (so the caller can stat it),
+// else "" (a named volume or relative source, which is not stat-checked).
+func mountHostPath(spec string) string {
+	host := spec
+	if i := strings.IndexByte(spec, ':'); i >= 0 {
+		host = spec[:i]
+	}
+	if strings.HasPrefix(host, "/") {
+		return host
+	}
+	return ""
 }
 
 // envKey upper-cases a component name into an env-var-safe suffix.
