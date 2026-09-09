@@ -39,6 +39,14 @@ type PodmanConfig struct {
 	// --device nodes plus (with RawUSB) its own boards' nodes in a private
 	// /dev/bus/usb. Kept as an escape hatch.
 	Privileged bool
+	// NetHost runs environments with the host network namespace (--network=host) so
+	// they can drive host network interfaces directly — e.g. a WiFi radio over
+	// nl80211 (iw/wpa_supplicant/hostapd) or a raw socket, which a bridged container
+	// can't reach across net namespaces. Port publishing is a no-op under host
+	// networking, so the environment's sshd binds the unit's port itself, injected
+	// as HITL_SSH_PORT (the image's entrypoint reads it). ONLY safe on a single-unit
+	// host: with several units their sshds would collide on host ports.
+	NetHost bool
 	// RawUSB gives each environment raw USB access to its unit's boards, isolated to
 	// just those boards' nodes in a private /dev/bus/usb tree (see isolateUSB) that
 	// tracks re-enumerations. Needed for libusb control paths (flashing, USB-JTAG,
@@ -110,11 +118,22 @@ func (p *PodmanRunner) Start(ctx context.Context, id, owner, sshKey string, unit
 		"--label", "hitl=1",
 		"--label", "hitl.owner=" + owner,
 		"--label", "hitl.unit=" + unit.Name,
-		"-p", fmt.Sprintf("%d:22", unit.SSHPort),
-		"-v", authKeys + ":/run/hitl/authorized_keys:ro",
-		"-e", "HITL_SSH_USER=" + p.cfg.SSHUser,
-		"-e", "HITL_UNIT=" + unit.Name,
 	}
+	if p.cfg.NetHost {
+		// Host networking: no bridge, so `-p` publishing is a no-op — the image's
+		// sshd binds the unit port itself from HITL_SSH_PORT. Gives the environment
+		// the host's interfaces (a WiFi radio, etc.) for full-stack RE.
+		args = append(args, "--network=host", "-e", fmt.Sprintf("HITL_SSH_PORT=%d", unit.SSHPort))
+	} else {
+		// Bridge network: publish the environment's sshd (:22) on the unit's host
+		// port so several units coexist without colliding.
+		args = append(args, "-p", fmt.Sprintf("%d:22", unit.SSHPort))
+	}
+	args = append(args,
+		"-v", authKeys+":/run/hitl/authorized_keys:ro",
+		"-e", "HITL_SSH_USER="+p.cfg.SSHUser,
+		"-e", "HITL_UNIT="+unit.Name,
+	)
 	if unit.Type != "" {
 		args = append(args, "-e", "HITL_UNIT_TYPE="+unit.Type)
 	}
