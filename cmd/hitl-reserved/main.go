@@ -57,6 +57,7 @@ func main() {
 	stateDir := flag.String("state-dir", "/var/lib/hitl", "writable scratch dir")
 	podman := flag.String("podman", "podman", "podman binary")
 	privileged := flag.Bool("privileged", false, "run environments privileged (leaks all host /dev; avoid on multi-unit hosts)")
+	netHost := flag.Bool("net-host", false, "run environments with host networking (--network=host) so they can drive host interfaces directly (e.g. a WiFi radio via nl80211); the environment sshd binds the unit port itself (HITL_SSH_PORT). Single-unit hosts only — units would otherwise collide on host ports.")
 	rawUSB := flag.Bool("raw-usb", true, "give environments raw USB access, isolated per unit")
 	brokerURL := flag.String("broker-url", "http://host.containers.internal:8087", "base URL environments use to reach this daemon's shared-resource brokers ($HITL_BROKER_URL)")
 	provSSID := flag.String("provisioning-ssid", "", "advertise this onboarding-network SSID in /status (overrides the catalog); e.g. a per-host provisioning AP")
@@ -113,6 +114,7 @@ func main() {
 		StateDir:   *stateDir,
 		Podman:     *podman,
 		Privileged: *privileged,
+		NetHost:    *netHost,
 		RawUSB:     *rawUSB,
 		ExtraEnv:   map[string]string{"HITL_BROKER_URL": *brokerURL},
 		Mounts:     mounts,
