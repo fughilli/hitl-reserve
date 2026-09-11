@@ -362,9 +362,19 @@ func (b *Broker) captureToSR(ctx context.Context, srPath string, m UnitMap, samp
 	if len(m.Channels) == 0 {
 		return errors.New("no analyzer channels mapped for this unit")
 	}
+	// captureratio keeps a slice of samples BEFORE the trigger. We trigger on the
+	// first RISING edge of the line, but a WS2812 bit begins with a rising edge —
+	// so without pre-trigger samples the capture starts AT bit 0's rising edge and
+	// sigrok's rgb_led_ws281x decoder, which needs to see the low→high transition,
+	// misses bit 0 entirely: every pixel decodes one bit short (e.g. red 00-FF-00
+	// GRB reads back as (254,1,0)) and the final pixel runs off the end (N-1 of N
+	// decode). A small pre-trigger window captures the idle-low ahead of bit 0 so
+	// the first transition is seen and the whole frame aligns. 2% of the default
+	// (~4ms) is well inside the inter-frame gap, so it adds idle-low, not a
+	// neighbouring frame.
 	args := []string{
 		"--driver", b.cfg.Driver,
-		"--config", "samplerate=" + b.cfg.SampleRate,
+		"--config", "samplerate=" + b.cfg.SampleRate + ":captureratio=2",
 		"--channels", strings.Join(m.Channels, ","),
 		"--triggers", m.Channels[0] + "=r",
 		"--samples", strconv.Itoa(samples),
