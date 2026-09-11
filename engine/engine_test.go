@@ -96,6 +96,51 @@ func TestMultiUnitConcurrent(t *testing.T) {
 	}
 }
 
+func TestMaxConcurrentCapsActive(t *testing.T) {
+	fr := newFakeRunner()
+	// Four free units but a host cap of 2: only two may be active at once.
+	m := New("h", time.Minute, fr,
+		WithUnits([]runner.Unit{{Name: "u0"}, {Name: "u1"}, {Name: "u2"}, {Name: "u3"}}),
+		WithMaxConcurrent(2))
+	ctx := context.Background()
+
+	a := m.Reserve(ctx, req("a"))
+	b := m.Reserve(ctx, req("b"))
+	c := m.Reserve(ctx, req("c"))
+	if a.State != api.StateActive || b.State != api.StateActive {
+		t.Fatalf("first two should be active: a=%s b=%s", a.State, b.State)
+	}
+	if c.State != api.StateQueued {
+		t.Fatalf("c should be queued behind the cap even though units are free, got %s", c.State)
+	}
+	// Releasing an active one frees a concurrency slot; the queued waiter starts.
+	m.Release(ctx, a.ID, "done")
+	cv, _ := m.Get(c.ID)
+	if cv.State != api.StateActive {
+		t.Fatalf("after release, c should promote into the freed slot, got %s", cv.State)
+	}
+	// Still capped at 2: a fourth request waits.
+	d := m.Reserve(ctx, req("d"))
+	if d.State != api.StateQueued {
+		t.Fatalf("d should stay queued (cap=2, two active), got %s", d.State)
+	}
+}
+
+func TestMaxConcurrentZeroUnlimited(t *testing.T) {
+	fr := newFakeRunner()
+	// Cap 0 is the default: every free unit is usable (no cap regression).
+	m := New("h", time.Minute, fr,
+		WithUnits([]runner.Unit{{Name: "u0"}, {Name: "u1"}, {Name: "u2"}}),
+		WithMaxConcurrent(0))
+	ctx := context.Background()
+	a := m.Reserve(ctx, req("a"))
+	b := m.Reserve(ctx, req("b"))
+	c := m.Reserve(ctx, req("c"))
+	if a.State != api.StateActive || b.State != api.StateActive || c.State != api.StateActive {
+		t.Fatalf("cap 0 should leave all three active: a=%s b=%s c=%s", a.State, b.State, c.State)
+	}
+}
+
 func TestCapabilityBestFit(t *testing.T) {
 	fr := newFakeRunner()
 	// u-plain has no caps; u-la additionally has the analyzer cap.
