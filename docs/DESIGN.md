@@ -65,6 +65,17 @@ work. A batch of reservations fills every free unit in one reconcile pass; a fai
 start drops that reservation (surfaced to the client as `released` with a message)
 and the pass continues so one bad unit can't strand the queue.
 
+### Host concurrency cap
+
+`--max-concurrent N` (`WithMaxConcurrent`) bounds how many reservations may be
+active on a host *at once*, independent of unit count. It's a host-level policy for
+protecting a weak SBC or a shared resource (USB bus, radio, CPU) from N-wide load:
+a host with four units but `--max-concurrent 2` keeps at most two environments
+running, and the rest wait in the admission queue and start as active ones release.
+`0` (default) is unlimited — concurrency is bounded only by the unit count. This is
+peak-concurrency shaping, not admission fairness: FIFO order and best-fit placement
+are unchanged; only the number of simultaneously-live slots is capped.
+
 ### Leases and reaping
 
 A reservation carries a lease. The holder (and queued waiters) heartbeat to extend

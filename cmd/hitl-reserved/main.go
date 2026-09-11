@@ -60,6 +60,7 @@ func main() {
 	netHost := flag.Bool("net-host", false, "run environments with host networking (--network=host) so they can drive host interfaces directly (e.g. a WiFi radio via nl80211); the environment sshd binds the unit port itself (HITL_SSH_PORT). Single-unit hosts only — units would otherwise collide on host ports.")
 	rawUSB := flag.Bool("raw-usb", true, "give environments raw USB access, isolated per unit")
 	brokerURL := flag.String("broker-url", "http://host.containers.internal:8087", "base URL environments use to reach this daemon's shared-resource brokers ($HITL_BROKER_URL)")
+	maxConcurrent := flag.Int("max-concurrent", 0, "cap concurrently-active reservations on this host regardless of unit count (0 = unlimited); protects a weak host or a shared bus/radio from N-wide load. Surplus reservations queue and start as active ones release.")
 	provSSID := flag.String("provisioning-ssid", "", "advertise this onboarding-network SSID in /status (overrides the catalog); e.g. a per-host provisioning AP")
 	provPSK := flag.String("provisioning-psk", "", "onboarding-network passphrase advertised alongside --provisioning-ssid")
 	var mounts stringList
@@ -132,6 +133,7 @@ func main() {
 		engine.WithWorkspace(ws),
 		engine.WithSharedResources(res.Registry.Describe()),
 		engine.WithProvisioningNetwork(provision),
+		engine.WithMaxConcurrent(*maxConcurrent),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

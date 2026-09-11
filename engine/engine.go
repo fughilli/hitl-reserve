@@ -48,6 +48,10 @@ type Manager struct {
 	provision *api.ProvisioningNetwork // advertised in Status (or nil)
 	hook      Hook
 
+	// maxConcurrent caps how many reservations may be Active at once on this host,
+	// even when more units are free. 0 = unlimited (bounded only by unit count).
+	maxConcurrent int
+
 	mu    sync.Mutex
 	items []*api.Reservation  // admission order; several may be Active (one per unit)
 	keys  map[string]string   // id -> SSH pubkey (not serialized out)
@@ -91,6 +95,15 @@ func WithSharedResources(s []api.SharedResourceInfo) Option {
 
 // WithHook wires host-level activation callbacks (see Hook).
 func WithHook(h Hook) Option { return func(m *Manager) { m.hook = h } }
+
+// WithMaxConcurrent caps how many reservations may be Active at once on this host,
+// even when more units are free — protecting a weak host or a shared resource (USB
+// bus, radio, CPU) from N-wide load. 0 (default) means unlimited, bounded only by
+// unit count. Surplus reservations wait in the admission queue and activate as
+// active ones release, so throughput is preserved; only peak concurrency is bounded.
+func WithMaxConcurrent(n int) Option {
+	return func(m *Manager) { m.maxConcurrent = n }
+}
 
 // New creates a Manager. lease is the heartbeat window: a reservation whose holder
 // stops heartbeating for longer than lease is reaped (active holders and queued
@@ -523,6 +536,13 @@ func (m *Manager) nextAssignmentLocked() (*runner.Unit, *api.Reservation) {
 		if r.State == api.StateActive {
 			busy[r.Unit] = true
 		}
+	}
+	// Per-host concurrency cap: don't activate beyond maxConcurrent environments at
+	// once, even when units are free (len(busy) == the active-reservation count —
+	// one active reservation per unit). Surplus reservations stay queued and start
+	// as active ones release. 0 = unlimited.
+	if m.maxConcurrent > 0 && len(busy) >= m.maxConcurrent {
+		return nil, nil
 	}
 	for _, r := range m.items {
 		if r.State != api.StateQueued {
