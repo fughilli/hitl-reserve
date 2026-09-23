@@ -163,6 +163,30 @@ repositories' fleets remote_write into one Grafana tenant** and be viewed togeth
 in one dashboard (filter/repeat by `workspace`) or split into per-workspace
 dashboards. See [`observability/`](observability/README.md).
 
+### Status pages
+
+Alongside the JSON API the daemon serves human-readable, self-refreshing HTML:
+
+- `GET /status.html` — host overview: every unit (free/busy), each active
+  reservation linking to its own page.
+- `GET /reservation/{id}/status.html` — one reservation's live view: uptime,
+  state, owner, unit (or queue position while waiting), endpoint, its annotations
+  (rendered as links when the value is a URL), and its scratchpad. It carries a 5s
+  meta-refresh and a form to append a scratchpad note.
+
+Each reservation also carries two free-form fields, exposed in the `Reservation`
+JSON (`/status`, `/reservation/{id}`) and mutable over HTTP:
+
+- **scratchpad** — an ordered list of timestamped `{time, author, text}` notes the
+  holder appends to record what it is doing.
+  `POST /reservation/{id}/scratchpad` accepts JSON (`{"author":…,"text":…}`) or a
+  url-encoded form; a form post 303-redirects back to the status page, an API post
+  returns the updated reservation JSON.
+- **annotations** — a `map[string]string` a deployment attaches per reservation
+  (the daemon does not interpret keys). Set one with
+  `POST /reservation/{id}/annotation` — JSON `{"key":…,"value":…}` — e.g. to attach
+  a URL to an external view that the status page then renders as a link.
+
 ## Reusing this as a Bazel module
 
 The repo is a bzlmod module (`hitl_reserve`). Depend on it from another Bazel repo

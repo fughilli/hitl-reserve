@@ -76,6 +76,14 @@ type Endpoint struct {
 	User string `json:"user"` // login user inside the environment
 }
 
+// Note is one timestamped entry in a reservation's scratchpad — a free-form line
+// an agent or user appends to record what it is doing while it holds the unit.
+type Note struct {
+	Time   time.Time `json:"time"`
+	Author string    `json:"author,omitempty"`
+	Text   string    `json:"text"`
+}
+
 // Reservation is the full server-side view of one reservation.
 type Reservation struct {
 	ID        string     `json:"id"`
@@ -92,6 +100,13 @@ type Reservation struct {
 	UnitType string `json:"unit_type,omitempty"`
 	// Message carries human-readable context (e.g. why released).
 	Message string `json:"message,omitempty"`
+	// Scratchpad is an ordered log of notes (oldest first) the holder appends to
+	// describe its activity on the unit.
+	Scratchpad []Note `json:"scratchpad,omitempty"`
+	// Annotations are free-form key→value pairs a deployment attaches to a
+	// reservation (e.g. a URL to an external view). Keys are deployment-defined; the
+	// daemon stores and surfaces them without interpreting any particular key.
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // ComponentStatus is one component's slice of a unit's status.

@@ -25,7 +25,7 @@ func (noopRunner) Start(context.Context, string, string, string, runner.Unit) (*
 func (noopRunner) Stop(context.Context, string) error { return nil }
 func (noopRunner) Cleanup(context.Context) error      { return nil }
 
-func newTestServer(t *testing.T) (*httptest.Server, *engine.Manager) {
+func newMaintTestServer(t *testing.T) (*httptest.Server, *engine.Manager) {
 	t.Helper()
 	mgr := engine.New("h", time.Minute, noopRunner{}, engine.WithUnits([]runner.Unit{{Name: "u0"}}))
 	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws"))
@@ -34,7 +34,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *engine.Manager) {
 }
 
 func TestMaintenanceEndpoints(t *testing.T) {
-	srv, mgr := newTestServer(t)
+	srv, mgr := newMaintTestServer(t)
 
 	// GET /maintenance on a fresh host: not cordoned.
 	var mst api.Maintenance
@@ -73,7 +73,7 @@ func TestMaintenanceEndpoints(t *testing.T) {
 }
 
 func TestMaintenanceWaitQuery(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv, _ := newMaintTestServer(t)
 	// On an idle host, ?wait=1 returns immediately with drained.
 	var mst api.Maintenance
 	postJSON(t, srv.URL+"/maintenance?wait=1", "", &mst)

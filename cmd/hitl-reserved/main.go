@@ -320,6 +320,103 @@ func routes(ctx context.Context, mgr *engine.Manager, reg *shared.Registry, work
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// Per-reservation live status page (html/template, 5s meta-refresh) with a form
+	// to append a scratchpad note.
+	mux.HandleFunc("GET /reservation/{id}/status.html", func(w http.ResponseWriter, r *http.Request) {
+		res, err := mgr.Get(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := renderReservation(w, res); err != nil {
+			log.Printf("render reservation %s: %v", res.ID, err)
+		}
+	})
+
+	// Append a scratchpad note. Accepts JSON ({"author":…,"text":…}) or an HTML form
+	// (author/text): a form post 303-redirects back to the status page, an API post
+	// returns 200 + the updated reservation JSON.
+	mux.HandleFunc("POST /reservation/{id}/scratchpad", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		var author, text string
+		form := isForm(r)
+		if form {
+			if err := r.ParseForm(); err != nil {
+				writeErr(w, http.StatusBadRequest, "parse form: "+err.Error())
+				return
+			}
+			author, text = r.FormValue("author"), r.FormValue("text")
+		} else {
+			var body struct {
+				Author string `json:"author"`
+				Text   string `json:"text"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+				writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+				return
+			}
+			author, text = body.Author, body.Text
+		}
+		if strings.TrimSpace(text) == "" {
+			writeErr(w, http.StatusBadRequest, "text is required")
+			return
+		}
+		res, err := mgr.AppendNote(id, author, text)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if form {
+			http.Redirect(w, r, "/reservation/"+id+"/status.html", http.StatusSeeOther)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+
+	// Set one free-form annotation ({"key":…,"value":…}) — for a deployment to attach
+	// its own metadata (e.g. a URL to an external view).
+	mux.HandleFunc("POST /reservation/{id}/annotation", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		var key, value string
+		if isForm(r) {
+			if err := r.ParseForm(); err != nil {
+				writeErr(w, http.StatusBadRequest, "parse form: "+err.Error())
+				return
+			}
+			key, value = r.FormValue("key"), r.FormValue("value")
+		} else {
+			var body struct {
+				Key   string `json:"key"`
+				Value string `json:"value"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+				writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+				return
+			}
+			key, value = body.Key, body.Value
+		}
+		if strings.TrimSpace(key) == "" {
+			writeErr(w, http.StatusBadRequest, "key is required")
+			return
+		}
+		res, err := mgr.SetAnnotation(id, key, value)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+
+	// Host overview page: every unit (free/busy) linking to each active
+	// reservation's status page.
+	mux.HandleFunc("GET /status.html", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := renderOverview(w, mgr.Status()); err != nil {
+			log.Printf("render overview: %v", err)
+		}
+	})
+
 	// Maintenance (cordon + drain): take the host out of service for maintenance
 	// (e.g. a daemon redeploy). Entering cordons the host so no queued reservation
 	// activates; active ones drain naturally. The cordon persists across a restart
@@ -448,4 +545,15 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, api.Error{Error: msg})
+}
+
+// isForm reports whether the request carries a url-encoded HTML form body (as
+// opposed to a JSON API body), so a handler can 303-redirect a browser form post
+// while returning JSON to an API client.
+func isForm(r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	return strings.TrimSpace(ct) == "application/x-www-form-urlencoded"
 }

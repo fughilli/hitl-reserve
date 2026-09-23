@@ -262,6 +262,68 @@ func TestStartFailureDropsAndContinues(t *testing.T) {
 	}
 }
 
+func TestAppendNote(t *testing.T) {
+	fr := newFakeRunner()
+	m := New("h", time.Minute, fr, WithUnits([]runner.Unit{{Name: "u0"}}))
+	ctx := context.Background()
+
+	a := m.Reserve(ctx, req("a"))
+	if _, err := m.AppendNote(a.ID, "agent", "first"); err != nil {
+		t.Fatal(err)
+	}
+	v, err := m.AppendNote(a.ID, "user", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Scratchpad) != 2 {
+		t.Fatalf("expected 2 notes, got %d", len(v.Scratchpad))
+	}
+	// Ordered oldest-first, with author and timestamp captured.
+	if v.Scratchpad[0].Text != "first" || v.Scratchpad[1].Text != "second" {
+		t.Fatalf("notes out of order: %+v", v.Scratchpad)
+	}
+	if v.Scratchpad[0].Author != "agent" || v.Scratchpad[0].Time.IsZero() {
+		t.Fatalf("note metadata not recorded: %+v", v.Scratchpad[0])
+	}
+	// The returned snapshot must not alias live state.
+	v.Scratchpad[0].Text = "mutated"
+	again, _ := m.Get(a.ID)
+	if again.Scratchpad[0].Text != "first" {
+		t.Fatalf("snapshot aliased live scratchpad: %q", again.Scratchpad[0].Text)
+	}
+	if _, err := m.AppendNote("nope", "x", "y"); err != ErrNotFound {
+		t.Fatalf("unknown id should be ErrNotFound, got %v", err)
+	}
+}
+
+func TestSetAnnotation(t *testing.T) {
+	fr := newFakeRunner()
+	m := New("h", time.Minute, fr, WithUnits([]runner.Unit{{Name: "u0"}}))
+	ctx := context.Background()
+
+	a := m.Reserve(ctx, req("a"))
+	if _, err := m.SetAnnotation(a.ID, "view", "http://example/x"); err != nil {
+		t.Fatal(err)
+	}
+	// Overwriting the same key replaces the value.
+	v, err := m.SetAnnotation(a.ID, "view", "http://example/y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Annotations["view"] != "http://example/y" {
+		t.Fatalf("annotation not overwritten: %v", v.Annotations)
+	}
+	// Snapshot must not alias live map.
+	v.Annotations["view"] = "mutated"
+	again, _ := m.Get(a.ID)
+	if again.Annotations["view"] != "http://example/y" {
+		t.Fatalf("snapshot aliased live annotations: %q", again.Annotations["view"])
+	}
+	if _, err := m.SetAnnotation("nope", "k", "v"); err != ErrNotFound {
+		t.Fatalf("unknown id should be ErrNotFound, got %v", err)
+	}
+}
+
 // hookRec records lifecycle callbacks.
 type hookRec struct{ first, idle int }
 
