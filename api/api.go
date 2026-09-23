@@ -146,6 +146,20 @@ type Status struct {
 	LeaseSeconds int                  `json:"lease_seconds"`          // heartbeat lease window
 	FreeUnits    int                  `json:"free_units"`             // units immediately available
 	QueueLength  int                  `json:"queue_length"`           // waiters not yet assigned a unit
+	// Cordoned is true when the host is in maintenance mode: no queued reservation
+	// will activate until it is uncordoned (existing active ones keep running).
+	Cordoned bool `json:"cordoned,omitempty"`
+	// Draining is true while cordoned with active reservations still running (i.e.
+	// cordoned but not yet fully drained). Once drained it is false.
+	Draining bool `json:"draining,omitempty"`
+}
+
+// Maintenance is the cordon/drain state returned by the maintenance endpoints.
+type Maintenance struct {
+	Cordoned bool `json:"cordoned"` // host is in maintenance mode
+	Active   int  `json:"active"`   // reservations still active (draining)
+	Queued   int  `json:"queued"`   // reservations waiting (held, not activating while cordoned)
+	Drained  bool `json:"drained"`  // cordoned && active == 0
 }
 
 // Error is the JSON error envelope for non-2xx responses.
