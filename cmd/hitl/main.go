@@ -9,6 +9,7 @@
 //	hitl status  [--host URL]        # or all hosts in the pool
 //	hitl release <id> [--host URL]
 //	hitl shared  <name> [--host URL] [--unit U] [BODY|-]   # broker access (e.g. analyzer capture)
+//	hitl maintenance [--release | --status] [--host URL]   # cordon + drain the host for maintenance
 package main
 
 import (
@@ -45,6 +46,8 @@ func main() {
 		err = cmdRelease(os.Args[2:])
 	case "shared":
 		err = cmdShared(os.Args[2:])
+	case "maintenance":
+		err = cmdMaintenance(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -66,6 +69,7 @@ func usage() {
   hitl status  [--host URL]
   hitl release <id> [--host URL]
   hitl shared  <name> [--host URL] [--unit U] [BODY|-]
+  hitl maintenance [--release | --status] [--host URL]
 
 Host selection: --host pins one host; otherwise $HITL_HOSTS (comma/space list) is
 the pool and the best matching host is chosen automatically.
@@ -203,7 +207,14 @@ func cmdStatus(args []string) error {
 			fmt.Printf("%s\tUNREACHABLE (%v)\n", base, err)
 			continue
 		}
-		fmt.Printf("%s  host=%s workspace=%s  free=%d queued=%d\n", base, st.Host, st.Workspace, st.FreeUnits, st.QueueLength)
+		maint := ""
+		if st.Cordoned {
+			maint = "  CORDONED"
+			if st.Draining {
+				maint = "  CORDONED (draining)"
+			}
+		}
+		fmt.Printf("%s  host=%s workspace=%s  free=%d queued=%d%s\n", base, st.Host, st.Workspace, st.FreeUnits, st.QueueLength, maint)
 		for _, u := range st.Units {
 			state := "free"
 			if u.Active != nil {
@@ -288,6 +299,84 @@ func cmdShared(args []string) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+// --- maintenance (cordon + drain) -----------------------------------------
+
+// cmdMaintenance drives the host's maintenance mode. With no flag it cordons the
+// host and polls until fully drained (no active reservations), printing progress —
+// the state to be in before a daemon redeploy. --status prints the current cordon
+// state; --release lifts the cordon so queued reservations resume activating.
+func cmdMaintenance(args []string) error {
+	fs, opts := commonFlags("maintenance")
+	release := fs.Bool("release", false, "lift the cordon and resume activating queued reservations")
+	statusOnly := fs.Bool("status", false, "print the current cordon/drain state and exit")
+	fs.Parse(args)
+
+	base, err := singleHost(*opts)
+	if err != nil {
+		return err
+	}
+
+	if *statusOnly {
+		var mst api.Maintenance
+		if err := doJSON(http.MethodGet, base+"/maintenance", nil, &mst); err != nil {
+			return err
+		}
+		printMaintenance(base, mst)
+		return nil
+	}
+
+	if *release {
+		var mst api.Maintenance
+		if err := doJSON(http.MethodPost, base+"/maintenance/release", nil, &mst); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "released cordon on %s (queued reservations resume activating)\n", base)
+		printMaintenance(base, mst)
+		return nil
+	}
+
+	// Enter maintenance, then poll until drained, printing progress.
+	var mst api.Maintenance
+	if err := doJSON(http.MethodPost, base+"/maintenance", nil, &mst); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "cordoned %s: %d active to drain, %d queued (held)\n", base, mst.Active, mst.Queued)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	lastActive := -1
+	for {
+		if err := doJSON(http.MethodGet, base+"/maintenance", nil, &mst); err != nil {
+			return err
+		}
+		if mst.Drained {
+			fmt.Fprintf(os.Stderr, "drained; in maintenance (release with: hitl maintenance --release --host %s)\n", base)
+			return nil
+		}
+		if mst.Active != lastActive {
+			fmt.Fprintf(os.Stderr, "draining: %d active remaining\n", mst.Active)
+			lastActive = mst.Active
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func printMaintenance(base string, m api.Maintenance) {
+	state := "in service"
+	if m.Cordoned {
+		state = "cordoned"
+		if !m.Drained {
+			state = "cordoned (draining)"
+		}
+	}
+	fmt.Printf("%s  %s  active=%d queued=%d drained=%v\n", base, state, m.Active, m.Queued, m.Drained)
 }
 
 // --- host selection -------------------------------------------------------
