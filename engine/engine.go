@@ -217,11 +217,14 @@ func (m *Manager) Reserve(ctx context.Context, req api.ReserveRequest) *api.Rese
 	now := time.Now()
 	exp := now.Add(m.lease)
 	r := &api.Reservation{
-		ID:        newID(),
-		Owner:     req.Owner,
-		State:     api.StateQueued,
-		CreatedAt: now,
-		ExpiresAt: &exp, // queued waiters carry a lease too, so a dead client is reaped
+		ID:             newID(),
+		Owner:          req.Owner,
+		OwnerEmail:     req.OwnerEmail,
+		Actor:          req.Actor,
+		IdentitySource: req.IdentitySource,
+		State:          api.StateQueued,
+		CreatedAt:      now,
+		ExpiresAt:      &exp, // queued waiters carry a lease too, so a dead client is reaped
 	}
 	m.keys[r.ID] = req.SSHPublicKey
 	if req.Unit != "" {

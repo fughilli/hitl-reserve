@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "identity",
+    srcs = ["identity.go"],
+    importpath = "github.com/fughilli/hitl-reserve/identity",
+    visibility = ["//visibility:public"],
+    deps = ["//api"],
+)
+
+go_test(
+    name = "identity_test",
+    srcs = ["identity_test.go"],
+    embed = [":identity"],
+    deps = ["//api"],
+)

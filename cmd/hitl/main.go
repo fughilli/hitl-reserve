@@ -84,6 +84,13 @@ func cmdReserve(args []string) error {
 	typ := fs.String("type", "", "require any free unit of this type")
 	caps := fs.String("caps", "", "require any free unit with these capabilities (comma-separated)")
 	owner := fs.String("owner", defaultOwner(), "owner id for logs/status")
+	ownerEmail := fs.String("owner-email", os.Getenv("HITL_OWNER_EMAIL"),
+		"attributable email of the person this reservation is for (default $HITL_OWNER_EMAIL). "+
+			"On a tailnet-verified daemon this is auto-filled from your tailscale identity and "+
+			"may be omitted; supply it when reserving on someone else's behalf from tagged infra.")
+	actor := fs.String("actor", envOr("HITL_ACTOR", "human"),
+		"who is reserving: \"human\" (a person at a keyboard) or \"agent\" (automation acting "+
+			"on the owner's behalf); default $HITL_ACTOR or human")
 	fs.Parse(args)
 	cmd := fs.Args()
 
@@ -102,7 +109,8 @@ func cmdReserve(args []string) error {
 	}
 
 	body, _ := json.Marshal(api.ReserveRequest{
-		Owner: *owner, SSHPublicKey: pub, Unit: *unit, UnitType: *typ, RequireCaps: reqCaps,
+		Owner: *owner, OwnerEmail: *ownerEmail, Actor: *actor,
+		SSHPublicKey: pub, Unit: *unit, UnitType: *typ, RequireCaps: reqCaps,
 	})
 	var res api.Reservation
 	if err := doJSON(http.MethodPost, base+"/reserve", body, &res); err != nil {
@@ -496,6 +504,14 @@ func defaultOwner() string {
 	}
 	u, _ := os.Hostname()
 	return "hitl-cli@" + u
+}
+
+// envOr returns $key if set and non-empty, else def.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func splitCSV(s string) []string {
