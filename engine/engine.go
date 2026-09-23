@@ -469,6 +469,20 @@ type DeviceMetric struct {
 	Busy bool
 }
 
+// ActiveReservation is one currently-active reservation's slice of a
+// MetricsSnapshot. It carries the identity a dashboard needs to table the
+// reservation and deep-link to its per-reservation status page: the ID (used to
+// build /reservation/{id}/status.html), the Owner, and the Unit it landed on.
+type ActiveReservation struct {
+	ID         string
+	Owner      string
+	OwnerEmail string // attributable identity (see api.Reservation.OwnerEmail)
+	Actor      string // "human" or "agent" (see api.Reservation.Actor)
+	Unit       string
+	UnitType   string
+	AgeSecs    float64 // seconds since the reservation went active (0 if unknown)
+}
+
 // MetricsSnapshot is a point-in-time view of the manager for the /metrics endpoint.
 type MetricsSnapshot struct {
 	Host         string
@@ -481,6 +495,10 @@ type MetricsSnapshot struct {
 	ActiveTotal int
 
 	Units []DeviceMetric
+
+	// Active is one entry per currently-active reservation, in ID order for
+	// stable output.
+	Active []ActiveReservation
 
 	Reservations  uint64
 	Activations   uint64
@@ -495,15 +513,31 @@ func (m *Manager) Metrics() MetricsSnapshot {
 	defer m.mu.Unlock()
 	busy := map[string]bool{}
 	active, queued := 0, 0
+	now := time.Now()
+	var actives []ActiveReservation
 	for _, r := range m.items {
 		switch r.State {
 		case api.StateActive:
 			busy[r.Unit] = true
 			active++
+			age := 0.0
+			if r.StartedAt != nil {
+				age = now.Sub(*r.StartedAt).Seconds()
+			}
+			actives = append(actives, ActiveReservation{
+				ID:         r.ID,
+				Owner:      r.Owner,
+				OwnerEmail: r.OwnerEmail,
+				Actor:      r.Actor,
+				Unit:       r.Unit,
+				UnitType:   r.UnitType,
+				AgeSecs:    age,
+			})
 		case api.StateQueued:
 			queued++
 		}
 	}
+	sort.Slice(actives, func(i, j int) bool { return actives[i].ID < actives[j].ID })
 	snap := MetricsSnapshot{
 		Host:          m.host,
 		Workspace:     m.workspace,
@@ -516,6 +550,7 @@ func (m *Manager) Metrics() MetricsSnapshot {
 		Releases:      m.cReleases,
 		LeaseExpiries: m.cLeaseExpiries,
 		StartFailures: m.cStartFailures,
+		Active:        actives,
 	}
 	for _, u := range m.units {
 		b := busy[u.Name]

@@ -350,3 +350,53 @@ func TestHookFirstActiveAllIdle(t *testing.T) {
 		t.Fatalf("OnAllIdle should fire once when last active releases, got %d", h.idle)
 	}
 }
+
+func TestMetricsActiveReservations(t *testing.T) {
+	fr := newFakeRunner()
+	m := New("h", time.Minute, fr, WithUnits([]runner.Unit{{Name: "u0"}, {Name: "u1"}}))
+	ctx := context.Background()
+
+	a := m.Reserve(ctx, req("alice"))
+	b := m.Reserve(ctx, req("bob"))
+	_ = m.Reserve(ctx, req("carol")) // queued: both units busy
+	if a.State != api.StateActive || b.State != api.StateActive {
+		t.Fatalf("a and b should be active: a=%s b=%s", a.State, b.State)
+	}
+
+	snap := m.Metrics()
+	if len(snap.Active) != 2 {
+		t.Fatalf("expected 2 active reservations in snapshot, got %d", len(snap.Active))
+	}
+	// Sorted by ID for stable output.
+	if snap.Active[0].ID > snap.Active[1].ID {
+		t.Fatalf("active reservations not sorted by id: %v", snap.Active)
+	}
+	byID := map[string]ActiveReservation{}
+	for _, r := range snap.Active {
+		byID[r.ID] = r
+	}
+	for _, want := range []*api.Reservation{a, b} {
+		got, ok := byID[want.ID]
+		if !ok {
+			t.Fatalf("active reservation %s missing from snapshot", want.ID)
+		}
+		if got.Owner != want.Owner || got.Unit != want.Unit {
+			t.Fatalf("active reservation mismatch: got owner=%q unit=%q want owner=%q unit=%q",
+				got.Owner, got.Unit, want.Owner, want.Unit)
+		}
+		if got.AgeSecs < 0 {
+			t.Fatalf("age should be non-negative, got %v", got.AgeSecs)
+		}
+	}
+
+	// Releasing one drops it from the active set.
+	if err := m.Release(ctx, a.ID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	snap = m.Metrics()
+	for _, r := range snap.Active {
+		if r.ID == a.ID {
+			t.Fatalf("released reservation %s still in active snapshot", a.ID)
+		}
+	}
+}
