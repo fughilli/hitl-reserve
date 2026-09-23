@@ -225,6 +225,36 @@ func (m *Manager) Heartbeat(id string) error {
 	return nil
 }
 
+// AppendNote appends a timestamped note to a reservation's scratchpad and returns
+// the updated snapshot. author may be empty. Works in any non-terminal state.
+func (m *Manager) AppendNote(id, author, text string) (*api.Reservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := m.findLocked(id)
+	if r == nil {
+		return nil, ErrNotFound
+	}
+	r.Scratchpad = append(r.Scratchpad, api.Note{Time: time.Now(), Author: author, Text: text})
+	return m.viewLocked(id), nil
+}
+
+// SetAnnotation sets (or overwrites) one free-form annotation on a reservation and
+// returns the updated snapshot. The daemon does not interpret the key; it is for a
+// deployment to attach its own metadata (e.g. a URL to an external view).
+func (m *Manager) SetAnnotation(id, key, val string) (*api.Reservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := m.findLocked(id)
+	if r == nil {
+		return nil, ErrNotFound
+	}
+	if r.Annotations == nil {
+		r.Annotations = map[string]string{}
+	}
+	r.Annotations[key] = val
+	return m.viewLocked(id), nil
+}
+
 // Release ends a reservation. If active, its environment is torn down and the next
 // compatible waiter is promoted.
 func (m *Manager) Release(ctx context.Context, id, reason string) error {
@@ -456,6 +486,18 @@ func (m *Manager) viewLocked(id string) *api.Reservation {
 	}
 	cp := *m.items[i]
 	cp.Position = i
+	// Deep-copy the scratchpad and annotations so the returned snapshot never
+	// aliases the live state a later AppendNote/SetAnnotation would mutate.
+	if len(cp.Scratchpad) > 0 {
+		cp.Scratchpad = append([]api.Note(nil), cp.Scratchpad...)
+	}
+	if len(cp.Annotations) > 0 {
+		ann := make(map[string]string, len(cp.Annotations))
+		for k, v := range cp.Annotations {
+			ann[k] = v
+		}
+		cp.Annotations = ann
+	}
 	return &cp
 }
 
