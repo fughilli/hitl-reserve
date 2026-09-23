@@ -11,6 +11,7 @@ import (
 
 	"github.com/fughilli/hitl-reserve/api"
 	"github.com/fughilli/hitl-reserve/engine"
+	"github.com/fughilli/hitl-reserve/identity"
 	"github.com/fughilli/hitl-reserve/runner"
 	"github.com/fughilli/hitl-reserve/shared"
 )
@@ -28,7 +29,7 @@ func (noopRunner) Cleanup(context.Context) error      { return nil }
 func newMaintTestServer(t *testing.T) (*httptest.Server, *engine.Manager) {
 	t.Helper()
 	mgr := engine.New("h", time.Minute, noopRunner{}, engine.WithUnits([]runner.Unit{{Name: "u0"}}))
-	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws"))
+	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws", identity.New(identity.ModeNone)))
 	t.Cleanup(srv.Close)
 	return srv, mgr
 }

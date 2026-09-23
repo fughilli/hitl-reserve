@@ -13,6 +13,7 @@ import (
 
 	"github.com/fughilli/hitl-reserve/api"
 	"github.com/fughilli/hitl-reserve/engine"
+	"github.com/fughilli/hitl-reserve/identity"
 	"github.com/fughilli/hitl-reserve/runner"
 	"github.com/fughilli/hitl-reserve/shared"
 )
@@ -35,9 +36,42 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 	if res.State != api.StateActive {
 		t.Fatalf("reservation should be active, got %s", res.State)
 	}
-	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws"))
+	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws", identity.New(identity.ModeNone)))
 	t.Cleanup(srv.Close)
 	return srv, res.ID
+}
+
+func TestStatusPageShowsIdentity(t *testing.T) {
+	mgr := engine.New("testhost", time.Minute, testRunner{}, engine.WithUnits([]runner.Unit{{Name: "u0", Type: "board"}}))
+	res := mgr.Reserve(context.Background(), api.ReserveRequest{
+		Owner: "agent-x", OwnerEmail: "kevin@example.com", Actor: "agent",
+		IdentitySource: "tailscale", SSHPublicKey: "ssh-ed25519 AAAA k",
+	})
+	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws", identity.New(identity.ModeNone)))
+	t.Cleanup(srv.Close)
+
+	body, err := io.ReadAll(mustGet(t, srv.URL+"/reservation/"+res.ID+"/status.html").Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(body)
+	for _, want := range []string{"attributed to", "kevin@example.com", "agent", "tailscale"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("status page missing %q", want)
+		}
+	}
+}
+
+func mustGet(t *testing.T, url string) *http.Response {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: %d", url, resp.StatusCode)
+	}
+	return resp
 }
 
 func TestScratchpadJSONPost(t *testing.T) {

@@ -49,6 +49,22 @@ const (
 type ReserveRequest struct {
 	// Owner is a free-form identifier for logs/status (e.g. an agent or issue id).
 	Owner string `json:"owner"`
+	// OwnerEmail is the verified identity of the human behind the reservation (e.g.
+	// an SSO/directory email). Unlike the free-form Owner label it is meant to be an
+	// attributable identity. Optional: when empty a deployment may best-effort resolve
+	// it (e.g. from the client's tailnet identity) on the daemon side.
+	OwnerEmail string `json:"owner_email,omitempty"`
+	// Actor records whether the reservation was made by a person at a keyboard
+	// ("human") or by an automated agent acting on that person's behalf ("agent") —
+	// both carry the same OwnerEmail, so this is the only thing distinguishing them.
+	// Empty is treated as "human".
+	Actor string `json:"actor,omitempty"`
+	// IdentitySource is populated by the daemon, never trusted from the client: it
+	// records how OwnerEmail was established — "tailscale" (verified from the caller's
+	// tailnet identity), "asserted" (taken from the request without independent proof,
+	// e.g. an agent on tagged infrastructure), or "" (none). Any client-supplied value
+	// is overwritten.
+	IdentitySource string `json:"identity_source,omitempty"`
 	// SSHPublicKey is the OpenSSH public key authorized on the unit's environment
 	// while this reservation is active (e.g. "ssh-ed25519 AAAA… agent").
 	SSHPublicKey string `json:"ssh_public_key"`
@@ -86,14 +102,24 @@ type Note struct {
 
 // Reservation is the full server-side view of one reservation.
 type Reservation struct {
-	ID        string     `json:"id"`
-	Owner     string     `json:"owner"`
-	State     State      `json:"state"`
-	Position  int        `json:"position"` // 0 == active/head, else waiters ahead
-	CreatedAt time.Time  `json:"created_at"`
-	StartedAt *time.Time `json:"started_at,omitempty"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"` // lease deadline
-	Endpoint  *Endpoint  `json:"endpoint,omitempty"`   // set once active
+	ID    string `json:"id"`
+	Owner string `json:"owner"`
+	// OwnerEmail is the verified identity of the human behind the reservation (see
+	// ReserveRequest.OwnerEmail). Empty when none was supplied or resolved.
+	OwnerEmail string `json:"owner_email,omitempty"`
+	// Actor is "human" or "agent" (see ReserveRequest.Actor). Empty is treated as
+	// "human".
+	Actor string `json:"actor,omitempty"`
+	// IdentitySource records how OwnerEmail was established: "tailscale" (verified),
+	// "asserted" (client-supplied, unverified), or "" (none). See
+	// ReserveRequest.IdentitySource.
+	IdentitySource string     `json:"identity_source,omitempty"`
+	State          State      `json:"state"`
+	Position       int        `json:"position"` // 0 == active/head, else waiters ahead
+	CreatedAt      time.Time  `json:"created_at"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"` // lease deadline
+	Endpoint       *Endpoint  `json:"endpoint,omitempty"`   // set once active
 	// Unit is the unit this reservation landed on (set once active).
 	Unit string `json:"unit,omitempty"`
 	// UnitType mirrors the landed unit's type (informational).

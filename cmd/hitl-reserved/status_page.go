@@ -107,6 +107,8 @@ var reservationTmpl = template.Must(template.New("reservation").Funcs(tmplFuncs)
 <table>
  <tr><th>state</th><td class="state">{{.R.State}}</td></tr>
  <tr><th>owner</th><td>{{if .R.Owner}}{{.R.Owner}}{{else}}<span class="muted">(none)</span>{{end}}</td></tr>
+{{if .R.OwnerEmail}} <tr><th>attributed to</th><td>{{.R.OwnerEmail}} <span class="muted">({{if .R.Actor}}{{.R.Actor}}{{else}}human{{end}}{{if .R.IdentitySource}}, {{.R.IdentitySource}}{{end}})</span></td></tr>
+{{end}}
 {{if .Queued}}
  <tr><th>queue position</th><td>{{.Position}} waiter(s) ahead</td></tr>
 {{else}}
@@ -170,7 +172,7 @@ var overviewTmpl = template.Must(template.New("overview").Parse(`<!doctype html>
   <td>{{if .Type}}{{.Type}}{{else}}<span class="muted">—</span>{{end}}</td>
 {{if .Active}}
   <td class="busy">busy</td>
-  <td><a href="/reservation/{{.Active.ID}}/status.html"><code>{{.Active.ID}}</code></a>{{if .Active.Owner}} <span class="muted">{{.Active.Owner}}</span>{{end}}</td>
+  <td><a href="/reservation/{{.Active.ID}}/status.html"><code>{{.Active.ID}}</code></a>{{if .Active.OwnerEmail}} <span class="muted">{{.Active.OwnerEmail}}{{if eq .Active.Actor "agent"}} (agent){{end}}</span>{{else if .Active.Owner}} <span class="muted">{{.Active.Owner}}</span>{{end}}</td>
 {{else}}
   <td class="free">free</td>
   <td class="muted">—</td>

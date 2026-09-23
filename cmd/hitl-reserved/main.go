@@ -29,6 +29,7 @@ import (
 	"github.com/fughilli/hitl-reserve/catalog"
 	"github.com/fughilli/hitl-reserve/discovery"
 	"github.com/fughilli/hitl-reserve/engine"
+	"github.com/fughilli/hitl-reserve/identity"
 	"github.com/fughilli/hitl-reserve/metrics"
 	"github.com/fughilli/hitl-reserve/runner"
 	"github.com/fughilli/hitl-reserve/shared"
@@ -63,6 +64,7 @@ func main() {
 	maxConcurrent := flag.Int("max-concurrent", 0, "cap concurrently-active reservations on this host regardless of unit count (0 = unlimited); protects a weak host or a shared bus/radio from N-wide load. Surplus reservations queue and start as active ones release.")
 	provSSID := flag.String("provisioning-ssid", "", "advertise this onboarding-network SSID in /status (overrides the catalog); e.g. a per-host provisioning AP")
 	provPSK := flag.String("provisioning-psk", "", "onboarding-network passphrase advertised alongside --provisioning-ssid")
+	identityMode := flag.String("identity", "", "how to attribute reservations to a person: \"tailscale\" verifies the caller's email via `tailscale whois` (the bench is reachable only over the tailnet, so this is free and unspoofable); \"\" (default) trusts the client-supplied owner_email as-is. The actor (human/agent) is always client-asserted.")
 	var mounts stringList
 	flag.Var(&mounts, "mount", "extra bind mount for every reservation environment, 'host[:container][:opts]' (repeatable). A host path that doesn't exist at start is skipped, so an optional host resource (e.g. a dbus socket) never breaks a rig that lacks it.")
 	flag.Parse()
@@ -167,7 +169,9 @@ func main() {
 		}
 	}()
 
-	srv := &http.Server{Addr: *addr, Handler: routes(ctx, mgr, res.Registry, ws)}
+	idResolver := identity.New(identity.Mode(*identityMode))
+	log.Printf("identity attribution: mode=%q", *identityMode)
+	srv := &http.Server{Addr: *addr, Handler: routes(ctx, mgr, res.Registry, ws, idResolver)}
 	go func() {
 		<-ctx.Done()
 		sc, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -261,7 +265,7 @@ func sortStrings(s []string) {
 	}
 }
 
-func routes(ctx context.Context, mgr *engine.Manager, reg *shared.Registry, workspace string) http.Handler {
+func routes(ctx context.Context, mgr *engine.Manager, reg *shared.Registry, workspace string, idResolver *identity.Resolver) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +295,10 @@ func routes(ctx context.Context, mgr *engine.Manager, reg *shared.Registry, work
 			writeErr(w, http.StatusBadRequest, fmt.Sprintf("unknown unit %q; host has %v", req.Unit, mgr.Units()))
 			return
 		}
+		// Attribute the reservation to a person: verify the caller's identity from the
+		// transport when possible, else trust the asserted owner_email. Sets
+		// OwnerEmail/Actor/IdentitySource on req before it reaches the engine.
+		idResolver.Resolve(r.RemoteAddr, &req)
 		writeJSON(w, http.StatusAccepted, mgr.Reserve(ctx, req))
 	})
 
