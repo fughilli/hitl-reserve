@@ -370,7 +370,9 @@ func (p *PodmanRunner) Cleanup(ctx context.Context) error {
 
 // ttyOf returns the host tty path of a "host[:container]" device mapping when the
 // container path is the pinned serial tty (or unset), else "". It anchors raw-USB
-// isolation on the board's serial node.
+// isolation on the board's serial node. The host path may be a glob (e.g. a by-id
+// path with a wildcard serial suffix); it is expanded to the first match so
+// isolation sees the real tty, or "" when it matches nothing.
 func ttyOf(d string) string {
 	host, container := d, ""
 	if i := strings.LastIndex(d, ":/"); i >= 0 {
@@ -379,18 +381,28 @@ func ttyOf(d string) string {
 	if container != "" && container != "/dev/ttyACM0" && !strings.HasPrefix(container, "/dev/tty") {
 		return ""
 	}
+	host, ok := globHostPath(host)
+	if !ok {
+		return ""
+	}
 	return host
 }
 
 // deviceMapping resolves one "host[:container]" --device spec into a concrete
 // podman --device value, or ok=false if the host device isn't present. It splits
-// on the last ":/" (a by-id name can itself contain colons, e.g. a MAC) and
-// resolves any symlink to the real node (podman --device wants a real node, and it
-// tracks a board that re-enumerated to a different ttyACMx since discovery).
+// on the last ":/" (a by-id name can itself contain colons, e.g. a MAC), expands a
+// glob in the host path (e.g. a by-id path with a wildcard serial suffix) to its
+// first match, and resolves any symlink to the real node (podman --device wants a
+// real node, and it tracks a board that re-enumerated to a different ttyACMx since
+// discovery).
 func deviceMapping(d string) (arg string, ok bool) {
 	host, container := d, ""
 	if i := strings.LastIndex(d, ":/"); i >= 0 {
 		host, container = d[:i], d[i+1:]
+	}
+	host, ok = globHostPath(host)
+	if !ok {
+		return "", false
 	}
 	real := host
 	if r, err := filepath.EvalSymlinks(host); err == nil {
@@ -403,6 +415,25 @@ func deviceMapping(d string) (arg string, ok bool) {
 		return real + ":" + container, true
 	}
 	return real, true
+}
+
+// globHostPath expands a host device path that contains a shell glob
+// metacharacter ("*", "?" or "[") to its first match, so a catalog device path
+// with a wildcard (e.g. a by-id path whose serial suffix varies) resolves to a
+// concrete node. Matches are sorted, so the choice is deterministic. A path with
+// no metacharacter passes through unchanged. Returns ok=false when a glob matches
+// nothing (or is malformed), so the caller treats the device as absent — the same
+// behavior a literal missing path already gets.
+func globHostPath(host string) (string, bool) {
+	if !strings.ContainsAny(host, "*?[") {
+		return host, true
+	}
+	matches, err := filepath.Glob(host)
+	if err != nil || len(matches) == 0 {
+		return "", false
+	}
+	sort.Strings(matches)
+	return matches[0], true
 }
 
 // sortedKeys returns m's keys in sorted order, for deterministic arg ordering.
