@@ -519,6 +519,27 @@ func writeMetrics(w io.Writer, snap engine.MetricsSnapshot, host metrics.HostSta
 			l(metrics.Label{Name: "unit", Value: u.Name}, metrics.Label{Name: "unit_type", Value: u.Type})...)
 	}
 
+	// One series per active reservation, carrying the id/owner/unit a dashboard
+	// needs to table the reservation and deep-link to its
+	// /reservation/{id}/status.html page. The value is always 1 (a presence
+	// gauge); the reservation's age is a companion gauge keyed by the same id.
+	for _, r := range snap.Active {
+		actor := r.Actor
+		if actor == "" {
+			actor = "human"
+		}
+		labels := l(
+			metrics.Label{Name: "id", Value: r.ID},
+			metrics.Label{Name: "owner", Value: r.Owner},
+			metrics.Label{Name: "owner_email", Value: r.OwnerEmail},
+			metrics.Label{Name: "actor", Value: actor},
+			metrics.Label{Name: "unit", Value: r.Unit},
+			metrics.Label{Name: "unit_type", Value: r.UnitType},
+		)
+		mw.Gauge("hitl_reservation", "1 for each currently-active reservation (labelled by id/owner/unit).", 1, labels...)
+		mw.Gauge("hitl_reservation_age_seconds", "Seconds since this reservation became active.", r.AgeSecs, labels...)
+	}
+
 	mw.Counter("hitl_reservations_total", "Reservations enqueued since start.", float64(snap.Reservations), l()...)
 	mw.Counter("hitl_activations_total", "Reservations that became active since start.", float64(snap.Activations), l()...)
 	mw.Counter("hitl_releases_total", "Reservations ended (any reason) since start.", float64(snap.Releases), l()...)
