@@ -15,6 +15,7 @@ go_test(
     name = "engine_test",
     srcs = [
         "engine_test.go",
+        "maintenance_test.go",
         "provision_test.go",
     ],
     embed = [":engine"],

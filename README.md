@@ -84,11 +84,28 @@ hitl reserve --type esp32c6            # queue for any free ESP32-C6, SSH in, re
 hitl reserve --caps sdr,led-strip      # queue for a unit with these capabilities (best-fit)
 hitl reserve --unit c6-b+sdr -- ./run-my-test.sh   # pin a composite; run a command; release
 hitl shared logic-analyzer --unit c6-a '{"op":"capture"}'   # use a shared resource
+
+hitl maintenance                       # cordon the host and wait until it drains
+hitl maintenance --status              # show the current cordon/drain state
+hitl maintenance --release             # lift the cordon; queued reservations resume
 ```
 
 The client generates a throwaway SSH keypair per reservation, authorizes it on the
 unit's environment, heartbeats to hold the lease, and releases on exit. See
 [`docs/DESIGN.md`](docs/DESIGN.md) for the environment image contract.
+
+### Maintenance mode
+
+To take a host out of service (e.g. to redeploy the daemon), `hitl maintenance`
+**cordons** it: queued reservations stop activating (new reserves still queue and
+hold their position) while active reservations keep running and **drain** on release
+or lease expiry. The command polls until the host is fully drained. The cordon
+persists across a daemon restart — it writes a marker at `<state-dir>/maintenance`
+and the daemon reads it on startup — so the host comes back still cordoned until
+`hitl maintenance --release` lifts it. `/status` reports `cordoned`/`draining`, and
+`GET /maintenance` returns `{cordoned, active, queued, drained}`. Endpoints:
+`POST /maintenance` (enter; `?wait=1` blocks until drained), `GET /maintenance`
+(status), `POST /maintenance/release` (leave).
 
 ## Declaring your hardware
 

@@ -11,6 +11,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"sync"
@@ -19,6 +21,12 @@ import (
 	"github.com/fughilli/hitl-reserve/api"
 	"github.com/fughilli/hitl-reserve/runner"
 )
+
+// maintenanceMarker is the file, under the manager's state dir, whose presence
+// cordons the host. It persists cordoned state across a daemon restart: on New the
+// manager reads it and comes up cordoned, so a maintenance window survives the
+// restart it exists to cover, until explicitly released.
+const maintenanceMarker = "maintenance"
 
 // ErrNotFound is returned for an unknown reservation id.
 var ErrNotFound = errors.New("reservation not found")
@@ -52,12 +60,25 @@ type Manager struct {
 	// even when more units are free. 0 = unlimited (bounded only by unit count).
 	maxConcurrent int
 
+	// stateDir is where the maintenance marker persists (empty = no persistence, the
+	// marker is kept in memory only — used by tests and marker-less deployments).
+	stateDir string
+
 	mu    sync.Mutex
 	items []*api.Reservation  // admission order; several may be Active (one per unit)
 	keys  map[string]string   // id -> SSH pubkey (not serialized out)
 	want  map[string]string   // id -> pinned unit name ("" = any)
 	typ   map[string]string   // id -> pinned unit type ("" = any)
 	caps  map[string][]string // id -> required capabilities (nil = none)
+
+	// cordoned, when set, stops the admission path from activating any queued
+	// reservation: new reserves still queue and hold a position, active reservations
+	// keep running and drain naturally, but nothing new promotes to active until the
+	// host is uncordoned. It is the "maintenance mode" flag. Guarded by mu.
+	cordoned bool
+	// drained is closed (and re-made on the next cordon) whenever the active count
+	// reaches zero while cordoned, so a waiter blocking on full drain wakes.
+	drained chan struct{}
 
 	// Monotonic lifecycle counters, exported via Metrics().
 	cReservations  uint64
@@ -105,6 +126,14 @@ func WithMaxConcurrent(n int) Option {
 	return func(m *Manager) { m.maxConcurrent = n }
 }
 
+// WithStateDir sets the directory the maintenance marker persists under (see
+// Cordon). When set, New reads the marker on startup so the host comes back
+// cordoned across a daemon restart. Empty (the default) keeps cordoned state in
+// memory only — it does not survive a restart.
+func WithStateDir(dir string) Option {
+	return func(m *Manager) { m.stateDir = dir }
+}
+
 // New creates a Manager. lease is the heartbeat window: a reservation whose holder
 // stops heartbeating for longer than lease is reaped (active holders and queued
 // waiters alike).
@@ -113,11 +142,29 @@ func New(host string, lease time.Duration, run runner.Runner, opts ...Option) *M
 		host: host, lease: lease, run: run,
 		keys: map[string]string{}, want: map[string]string{},
 		typ: map[string]string{}, caps: map[string][]string{},
+		drained: make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(m)
 	}
+	// Persisted cordon: if the marker survives from a previous run, start cordoned so
+	// a maintenance window holds across the restart it was taken for.
+	if m.markerPath() != "" {
+		if _, err := os.Stat(m.markerPath()); err == nil {
+			m.cordoned = true
+			log.Printf("maintenance: found marker %s; starting cordoned", m.markerPath())
+		}
+	}
 	return m
+}
+
+// markerPath is the maintenance marker's absolute path, or "" when no state dir is
+// configured (in-memory cordon only).
+func (m *Manager) markerPath() string {
+	if m.stateDir == "" {
+		return ""
+	}
+	return filepath.Join(m.stateDir, maintenanceMarker)
 }
 
 // SetSharedResources refreshes the advertised shared resources (e.g. after a
@@ -276,8 +323,23 @@ func (m *Manager) Release(ctx context.Context, id, reason string) error {
 	m.reconcileLocked(ctx)
 	if wasActive && !m.anyActiveLocked() {
 		m.hookAllIdle(ctx)
+		m.signalDrainedLocked()
 	}
 	return nil
+}
+
+// signalDrainedLocked wakes anyone blocked on full drain (Cordon(wait)) by closing
+// the drained channel, when the host is cordoned and no reservation is active.
+// Called on the active->idle edge. Idempotent: a re-cordon installs a fresh channel.
+func (m *Manager) signalDrainedLocked() {
+	if !m.cordoned {
+		return
+	}
+	select {
+	case <-m.drained: // already closed
+	default:
+		close(m.drained)
+	}
 }
 
 // ReapExpired releases every reservation whose lease has lapsed — active holders
@@ -361,6 +423,8 @@ func (m *Manager) Status() api.Status {
 		LeaseSeconds: int(m.lease.Seconds()),
 		Shared:       m.shared,
 		Provisioning: m.provision,
+		Cordoned:     m.cordoned,
+		Draining:     m.cordoned && m.anyActiveLocked(),
 	}
 	holders := map[string]*api.Reservation{}
 	for _, r := range m.items {
@@ -458,6 +522,104 @@ func (m *Manager) Metrics() MetricsSnapshot {
 		snap.Units = append(snap.Units, DeviceMetric{Name: u.Name, Type: u.Type, Busy: b})
 	}
 	return snap
+}
+
+// --- maintenance / drain --------------------------------------------------
+
+// Cordon puts the host into maintenance mode: queued reservations stop activating
+// (new reserves still queue and hold a position), while active reservations keep
+// running and drain naturally via release or lease expiry. It writes the marker so
+// the cordon survives a daemon restart (see New). Returns a snapshot of the drain
+// state (see api.Maintenance). It is idempotent — cordoning an already-cordoned
+// host just returns the current state.
+func (m *Manager) Cordon() api.Maintenance {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.cordoned {
+		m.cordoned = true
+		m.drained = make(chan struct{}) // fresh drain latch for this window
+		if p := m.markerPath(); p != "" {
+			if err := os.MkdirAll(m.stateDir, 0o755); err != nil {
+				log.Printf("maintenance: mkdir state dir: %v", err)
+			}
+			if err := os.WriteFile(p, []byte("cordoned\n"), 0o644); err != nil {
+				log.Printf("maintenance: write marker %s: %v", p, err)
+			}
+		}
+		log.Printf("maintenance: cordoned (marker=%q)", m.markerPath())
+	}
+	// If already drained at cordon time, latch it so a waiter returns immediately.
+	if !m.anyActiveLocked() {
+		m.signalDrainedLocked()
+	}
+	return m.maintenanceLocked()
+}
+
+// Uncordon leaves maintenance mode: it removes the marker and lets queued
+// reservations activate again, reconciling immediately so waiters that piled up
+// during the window promote onto free units. Idempotent.
+func (m *Manager) Uncordon(ctx context.Context) api.Maintenance {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cordoned {
+		m.cordoned = false
+		if p := m.markerPath(); p != "" {
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				log.Printf("maintenance: remove marker %s: %v", p, err)
+			}
+		}
+		log.Printf("maintenance: uncordoned; resuming activation")
+		m.reconcileLocked(ctx)
+	}
+	return m.maintenanceLocked()
+}
+
+// Maintenance returns the current cordon/drain snapshot.
+func (m *Manager) Maintenance() api.Maintenance {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.maintenanceLocked()
+}
+
+// WaitDrained blocks until the host is fully drained (cordoned with no active
+// reservation) or ctx is done, then returns the final snapshot. It is meant to be
+// called right after Cordon by an operator draining the rig for maintenance. If the
+// host is not cordoned it returns at once (there is no drain to wait for).
+func (m *Manager) WaitDrained(ctx context.Context) api.Maintenance {
+	for {
+		m.mu.Lock()
+		if !m.cordoned || !m.anyActiveLocked() {
+			s := m.maintenanceLocked()
+			m.mu.Unlock()
+			return s
+		}
+		ch := m.drained
+		m.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return m.Maintenance()
+		case <-ch:
+		}
+	}
+}
+
+// maintenanceLocked builds the current cordon/drain snapshot.
+func (m *Manager) maintenanceLocked() api.Maintenance {
+	active, queued := 0, 0
+	for _, r := range m.items {
+		switch r.State {
+		case api.StateActive:
+			active++
+		case api.StateQueued:
+			queued++
+		}
+	}
+	return api.Maintenance{
+		Cordoned: m.cordoned,
+		Active:   active,
+		Queued:   queued,
+		Drained:  m.cordoned && active == 0,
+	}
 }
 
 // --- locked helpers -------------------------------------------------------
@@ -573,6 +735,11 @@ func (m *Manager) reconcileLocked(ctx context.Context) {
 // waiter needing a later unit's capabilities still activates while an earlier free
 // unit has no compatible work.
 func (m *Manager) nextAssignmentLocked() (*runner.Unit, *api.Reservation) {
+	// Cordoned for maintenance: never promote a queued reservation to active. Waiters
+	// keep their positions and activate once uncordoned; active ones drain naturally.
+	if m.cordoned {
+		return nil, nil
+	}
 	busy := map[string]bool{}
 	for _, r := range m.items {
 		if r.State == api.StateActive {

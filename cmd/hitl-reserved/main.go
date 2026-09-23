@@ -134,6 +134,7 @@ func main() {
 		engine.WithSharedResources(res.Registry.Describe()),
 		engine.WithProvisioningNetwork(provision),
 		engine.WithMaxConcurrent(*maxConcurrent),
+		engine.WithStateDir(*stateDir),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -414,6 +415,39 @@ func routes(ctx context.Context, mgr *engine.Manager, reg *shared.Registry, work
 		if err := renderOverview(w, mgr.Status()); err != nil {
 			log.Printf("render overview: %v", err)
 		}
+	})
+
+	// Maintenance (cordon + drain): take the host out of service for maintenance
+	// (e.g. a daemon redeploy). Entering cordons the host so no queued reservation
+	// activates; active ones drain naturally. The cordon persists across a restart
+	// (marker under the state dir) until explicitly released.
+	mux.HandleFunc("GET /maintenance", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, mgr.Maintenance())
+	})
+
+	mux.HandleFunc("POST /maintenance", func(w http.ResponseWriter, r *http.Request) {
+		wait := r.URL.Query().Has("wait")
+		// Also accept {"wait": true} in the body (optional).
+		if !wait {
+			var body struct {
+				Wait bool `json:"wait"`
+			}
+			if r.Body != nil {
+				if b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16)); len(b) > 0 {
+					_ = json.Unmarshal(b, &body)
+				}
+			}
+			wait = body.Wait
+		}
+		st := mgr.Cordon()
+		if wait {
+			st = mgr.WaitDrained(r.Context()) // block until active == 0 (or client goes away)
+		}
+		writeJSON(w, http.StatusOK, st)
+	})
+
+	mux.HandleFunc("POST /maintenance/release", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, mgr.Uncordon(ctx))
 	})
 
 	// Shared resources: list, and broker access. Access is a generic passthrough —

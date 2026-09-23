@@ -28,7 +28,10 @@ go_binary(
 
 go_test(
     name = "hitl-reserved_test",
-    srcs = ["status_page_test.go"],
+    srcs = [
+        "maintenance_test.go",
+        "status_page_test.go",
+    ],
     embed = [":hitl-reserved_lib"],
     deps = [
         "//api",
