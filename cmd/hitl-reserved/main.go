@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -61,6 +62,8 @@ func main() {
 	netHost := flag.Bool("net-host", false, "run environments with host networking (--network=host) so they can drive host interfaces directly (e.g. a WiFi radio via nl80211); the environment sshd binds the unit port itself (HITL_SSH_PORT). Single-unit hosts only — units would otherwise collide on host ports.")
 	rawUSB := flag.Bool("raw-usb", true, "give environments raw USB access, isolated per unit")
 	brokerURL := flag.String("broker-url", "http://host.containers.internal:8087", "base URL environments use to reach this daemon's shared-resource brokers ($HITL_BROKER_URL)")
+	runnerKind := flag.String("runner", "auto", `execution backend: "podman" (Linux container per reservation), "darwin" (scoped SSH grant into a shared macOS host user — no container), or "auto" (darwin on macOS, else podman)`)
+	darwinSSHPort := flag.Int("darwin-ssh-port", 22, "host sshd port holders connect to on the darwin runner (reservations share the Mac's sshd, scoped by authorized_keys)")
 	maxConcurrent := flag.Int("max-concurrent", 0, "cap concurrently-active reservations on this host regardless of unit count (0 = unlimited); protects a weak host or a shared bus/radio from N-wide load. Surplus reservations queue and start as active ones release.")
 	provSSID := flag.String("provisioning-ssid", "", "advertise this onboarding-network SSID in /status (overrides the catalog); e.g. a per-host provisioning AP")
 	provPSK := flag.String("provisioning-psk", "", "onboarding-network passphrase advertised alongside --provisioning-ssid")
@@ -110,18 +113,45 @@ func main() {
 		provision = &api.ProvisioningNetwork{SSID: *provSSID, PSK: *provPSK}
 	}
 
-	run := runner.NewPodman(runner.PodmanConfig{
-		Image:      *image,
-		Host:       host,
-		SSHUser:    *sshUser,
-		StateDir:   *stateDir,
-		Podman:     *podman,
-		Privileged: *privileged,
-		NetHost:    *netHost,
-		RawUSB:     *rawUSB,
-		ExtraEnv:   map[string]string{"HITL_BROKER_URL": *brokerURL},
-		Mounts:     mounts,
-	})
+	// Pick the execution backend. The podman backend runs a Linux container per
+	// reservation; the darwin backend has no container (a Mac is a multi-tenant
+	// host) and instead scopes an SSH grant into a shared user. "auto" resolves by
+	// GOOS so the same catalog/flags work on either host.
+	kind := *runnerKind
+	if kind == "auto" {
+		if runtime.GOOS == "darwin" {
+			kind = "darwin"
+		} else {
+			kind = "podman"
+		}
+	}
+	var run runner.Runner
+	switch kind {
+	case "darwin":
+		run = runner.NewDarwin(runner.DarwinConfig{
+			Host:     host,
+			SSHUser:  *sshUser,
+			SSHPort:  *darwinSSHPort,
+			StateDir: *stateDir,
+			ExtraEnv: map[string]string{"HITL_BROKER_URL": *brokerURL},
+		})
+		log.Printf("runner: darwin (shared user %q, sshd :%d)", *sshUser, *darwinSSHPort)
+	case "podman":
+		run = runner.NewPodman(runner.PodmanConfig{
+			Image:      *image,
+			Host:       host,
+			SSHUser:    *sshUser,
+			StateDir:   *stateDir,
+			Podman:     *podman,
+			Privileged: *privileged,
+			NetHost:    *netHost,
+			RawUSB:     *rawUSB,
+			ExtraEnv:   map[string]string{"HITL_BROKER_URL": *brokerURL},
+			Mounts:     mounts,
+		})
+	default:
+		log.Fatalf("unknown --runner %q (want podman|darwin|auto)", *runnerKind)
+	}
 
 	for _, u := range res.Units {
 		log.Printf("unit: name=%s type=%s kind=%s ssh-port=%d caps=%v", u.Name, u.Type, u.Kind, u.SSHPort, u.Capabilities)
