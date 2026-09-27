@@ -49,6 +49,64 @@ type Config struct {
 	// can never collide with a seeded unit). SeededMax bounds them (default 8).
 	SeededPortBase int `json:"seeded_ssh_port_base,omitempty"`
 	SeededMax      int `json:"seeded_max,omitempty"`
+
+	// ChipOverrides pins the resource type + name prefix for specific boards that
+	// USB discovery cannot tell apart. Some Espressif chips (e.g. the ESP32-C3 and
+	// ESP32-C6) enumerate over the identical native USB-JTAG PID (303a:1001), so the
+	// glob-based Type/NamePrefix would mislabel one as the other. Key each entry by
+	// the board's USB serial (an ESP32's is its MAC); matching is case-insensitive
+	// and ignores separators, so "AC:27:6E:7F:18:60" and "ac276e7f1860" both match.
+	// A matched board takes the override's Type (→ its resource-type caps) and
+	// NamePrefix in place of the discovery defaults; unmatched boards are unchanged.
+	ChipOverrides map[string]ChipOverride `json:"chip_overrides,omitempty"`
+}
+
+// ChipOverride pins one board's resource type and/or name prefix, overriding the
+// discovery defaults for a board USB enumeration cannot disambiguate. Either field
+// may be empty, in which case the discovery default (Config.Type / Config.NamePrefix)
+// is kept for that field.
+type ChipOverride struct {
+	Type       string `json:"type,omitempty"`        // -> resource type (caps); empty keeps Config.Type
+	NamePrefix string `json:"name_prefix,omitempty"` // unit/component name prefix; empty keeps Config.NamePrefix
+}
+
+// normalizeSerial lowercases a board serial and drops every non-alphanumeric rune
+// (colons, dashes) so an override key matches regardless of separator/case.
+func normalizeSerial(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		}
+	}
+	return b.String()
+}
+
+// chipFor resolves a board's serial to its effective (type, namePrefix): the
+// matching chip override's non-empty fields, falling back to the discovery defaults.
+// ok reports whether an override matched (for logging).
+func (c *Config) chipFor(serial string) (typ, namePrefix string, ok bool) {
+	typ, namePrefix = c.Type, c.NamePrefix
+	if serial == "" || len(c.ChipOverrides) == 0 {
+		return typ, namePrefix, false
+	}
+	key := normalizeSerial(serial)
+	for k, ov := range c.ChipOverrides {
+		if normalizeSerial(k) != key {
+			continue
+		}
+		if ov.Type != "" {
+			typ = ov.Type
+		}
+		if ov.NamePrefix != "" {
+			namePrefix = ov.NamePrefix
+		}
+		return typ, namePrefix, true
+	}
+	return typ, namePrefix, false
 }
 
 // ParseConfig parses a raw discovery config, filling defaults. A nil raw or one
@@ -188,7 +246,7 @@ func (m *Monitor) scanUSB() ([]runner.Unit, error) {
 	if err != nil {
 		return nil, fmt.Errorf("discover glob %q: %w", m.cfg.Glob, err)
 	}
-	boards := boardsFromByID(matches, m.cfg.NamePrefix)
+	boards := boardsFromByID(matches, m.cfg)
 	now := m.now()
 
 	used := map[int]bool{}
@@ -233,19 +291,24 @@ func (m *Monitor) scanUSB() ([]runner.Unit, error) {
 	return out, nil
 }
 
-// build assembles a unit for one discovered board.
+// build assembles a unit for one discovered board. The board's type (b.typ) is the
+// discovery default unless a chip override pinned it to another resource type.
 func (m *Monitor) build(name string, port int, b board) runner.Unit {
+	typ := b.typ
+	if typ == "" {
+		typ = m.cfg.Type
+	}
 	comp := runner.Component{
 		Name:         name,
-		Type:         m.cfg.Type,
+		Type:         typ,
 		Kind:         "usb",
-		Capabilities: m.typeCaps(m.cfg.Type),
+		Capabilities: m.typeCaps(typ),
 		Devices:      b.devices,
 		Env:          b.env,
 	}
 	u := runner.Unit{
 		Name:         name,
-		Type:         m.cfg.Type,
+		Type:         typ,
 		Kind:         "usb",
 		Capabilities: append([]string(nil), comp.Capabilities...),
 		Components:   []runner.Component{comp},
@@ -421,17 +484,22 @@ func (m *Monitor) Run(ctx context.Context, s Syncer) {
 }
 
 // board is one physical board discovered on the host, identified by a stable name
-// derived from its USB serial so it keeps that identity across re-enumeration.
+// derived from its USB serial so it keeps that identity across re-enumeration. typ
+// is the resource type it should carry (the discovery default, or a chip override's).
 type board struct {
 	name    string
+	typ     string
+	serial  string
 	devices []string
 	env     map[string]string
 }
 
 // boardsFromByID turns /dev/serial/by-id paths into boards. It keeps only each
 // board's primary CDC-ACM interface (…-if00, or names with no -if token), dedupes
-// by resolved tty and derived name, and pins each tty to /dev/ttyACM0.
-func boardsFromByID(paths []string, prefix string) []board {
+// by resolved tty and derived name, and pins each tty to /dev/ttyACM0. A board whose
+// serial matches a chip override takes that override's type + name prefix (so an
+// otherwise-indistinguishable chip like the ESP32-C3 is labeled correctly).
+func boardsFromByID(paths []string, cfg Config) []board {
 	seenTTY, seenName := map[string]bool{}, map[string]bool{}
 	var out []board
 	for _, path := range paths {
@@ -446,14 +514,16 @@ func boardsFromByID(paths []string, prefix string) []board {
 		if seenTTY[target] {
 			continue
 		}
+		serial := espSerialFromByID(base)
+		typ, prefix, _ := cfg.chipFor(serial)
 		name := nameFromByID(base, prefix)
 		if seenName[name] {
 			continue
 		}
 		seenTTY[target], seenName[name] = true, true
-		b := board{name: name, devices: []string{path + ":/dev/ttyACM0"}}
-		if s := espSerialFromByID(base); s != "" {
-			b.env = map[string]string{"HITL_ADAPTER_SERIAL": s}
+		b := board{name: name, typ: typ, serial: serial, devices: []string{path + ":/dev/ttyACM0"}}
+		if serial != "" {
+			b.env = map[string]string{"HITL_ADAPTER_SERIAL": serial}
 		}
 		out = append(out, b)
 	}

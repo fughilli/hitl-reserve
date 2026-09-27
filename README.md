@@ -147,7 +147,12 @@ The catalog is declarative JSON. The four hardware scenarios in one file:
 - **`discovery`** layers runtime-detected units on top of the static catalog: USB
   boards by `glob`, and/or units listed in a `seeded_file` (the general way to
   attach a unit the host can't auto-detect — e.g. a network device — by editing a
-  JSON file on the running host, no redeploy).
+  JSON file on the running host, no redeploy). `chip_overrides` pins the `type` +
+  `name_prefix` for specific boards a bare USB scan can't tell apart (some Espressif
+  chips — e.g. the ESP32-C3 and ESP32-C6 — share the native USB-JTAG PID
+  `303a:1001`); key each entry by the board's USB serial (an ESP32's is its MAC),
+  matched case- and separator-insensitively, e.g.
+  `"chip_overrides": {"AC:27:6E:7F:18:60": {"type": "esp32c3", "name_prefix": "c3-"}}`.
 - **`provisioning_network`** advertises an onboarding network (SSID/PSK) in
   `/status` so a holder can provision a DUT onto it with no out-of-band creds; a
   per-host SSID can be supplied at runtime via `--provisioning-ssid/-psk`.
