@@ -224,6 +224,8 @@ func analyzerFactory(mapPath string) catalog.BrokerFactory {
 			Driver     string                      `json:"driver"`
 			SampleRate string                      `json:"samplerate"`
 			Samples    int                         `json:"samples"`
+			TimingRate string                      `json:"timing_samplerate"`
+			TimingMax  int                         `json:"timing_max_ms"`
 			SigrokCLI  string                      `json:"sigrok_cli"`
 			Map        map[string]analyzer.UnitMap `json:"map"`
 		}
@@ -233,14 +235,16 @@ func analyzerFactory(mapPath string) catalog.BrokerFactory {
 			}
 		}
 		return analyzer.New(analyzer.Config{
-			Name:          name,
-			Driver:        cfg.Driver,
-			SampleRate:    cfg.SampleRate,
-			Samples:       cfg.Samples,
-			SigrokCLI:     cfg.SigrokCLI,
-			Map:           cfg.Map,
-			MapPath:       mapPath,
-			HardwareProbe: analyzer.FX2Present,
+			Name:             name,
+			Driver:           cfg.Driver,
+			SampleRate:       cfg.SampleRate,
+			Samples:          cfg.Samples,
+			TimingSampleRate: cfg.TimingRate,
+			TimingMaxMs:      cfg.TimingMax,
+			SigrokCLI:        cfg.SigrokCLI,
+			Map:              cfg.Map,
+			MapPath:          mapPath,
+			HardwareProbe:    analyzer.FX2Present,
 		}), nil
 	}
 }
