@@ -52,6 +52,13 @@ type Config struct {
 	SampleRate string
 	// Samples is the default capture length in samples.
 	Samples int
+	// TimingSampleRate is the default samplerate for the "timing" op (a long,
+	// untriggered, streamed capture), e.g. "12m" (the default): 83ns resolution is
+	// plenty against WS2812's ±150ns tolerance, and 12 MB/s leaves USB2 headroom on
+	// a Pi whose bus is shared with Ethernet. A request may override it.
+	TimingSampleRate string
+	// TimingMaxMs caps one timing capture's window (default 60000).
+	TimingMaxMs int
 	// Map is the initial unit→channel map, keyed by unit name; key "" is the
 	// default/fallback. Bindings from the catalog overlay this.
 	Map map[string]UnitMap
@@ -87,6 +94,12 @@ func New(cfg Config) *Broker {
 	}
 	if cfg.Samples == 0 {
 		cfg.Samples = 5000000 // ≈208ms @24MHz; span the DUT's frame cadence (see splanc notes)
+	}
+	if cfg.TimingSampleRate == "" {
+		cfg.TimingSampleRate = "12m"
+	}
+	if cfg.TimingMaxMs <= 0 {
+		cfg.TimingMaxMs = 60000
 	}
 	if cfg.Map == nil {
 		cfg.Map = map[string]UnitMap{}
@@ -149,9 +162,12 @@ func (b *Broker) Describe() api.SharedResourceInfo {
 	sort.Strings(protocols)
 	sort.Strings(channels)
 	info.Attributes = map[string]any{
-		"driver":    b.cfg.Driver,
-		"protocols": protocols,
-		"channels":  channels,
+		"driver":            b.cfg.Driver,
+		"protocols":         protocols,
+		"channels":          channels,
+		"ops":               []string{"capture", "timing", "map.get", "map.set"},
+		"timing_samplerate": b.cfg.TimingSampleRate,
+		"timing_max_ms":     b.cfg.TimingMaxMs,
 	}
 	return info
 }
@@ -192,9 +208,10 @@ func capsForProtocol(p Protocol) []string {
 // accessRequest is the broker's request envelope (POST /shared/{name}). Op selects
 // the operation; an empty Op means "capture".
 type accessRequest struct {
-	Op string `json:"op,omitempty"` // "capture" (default), "map.get", "map.set"
+	Op string `json:"op,omitempty"` // "capture" (default), "timing", "map.get", "map.set"
 	CaptureRequest
-	Map map[string]UnitMap `json:"map,omitempty"` // for op=map.set
+	TimingOptions                    // for op=timing (see timing_capture.go)
+	Map           map[string]UnitMap `json:"map,omitempty"` // for op=map.set
 }
 
 // CaptureRequest asks for a decoded trace of a unit's tapped line.
@@ -239,6 +256,15 @@ func (b *Broker) Access(ctx context.Context, unit string, body []byte) ([]byte, 
 			req.Unit = unit
 		}
 		res, err := b.capture(ctx, req.CaptureRequest)
+		if err != nil {
+			return jsonErr(err.Error(), 500)
+		}
+		return okJSON(res)
+	case "timing":
+		if req.Unit == "" {
+			req.Unit = unit
+		}
+		res, err := b.timing(ctx, req.CaptureRequest, req.TimingOptions)
 		if err != nil {
 			return jsonErr(err.Error(), 500)
 		}

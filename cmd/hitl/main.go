@@ -298,7 +298,7 @@ func cmdShared(args []string) error {
 	if *unit != "" {
 		url += "?unit=" + *unit
 	}
-	raw, err := doRaw(http.MethodPost, url, body)
+	raw, err := doRawWith(brokerClient, http.MethodPost, url, body)
 	if err != nil {
 		return err
 	}
@@ -438,7 +438,15 @@ func chooseHost(o commonOpts, req pool.Require) (string, error) {
 
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
+// brokerClient is for /shared/{name}: broker ops can legitimately run long (an
+// analyzer "timing" op streams a capture window of up to a minute, then analyzes).
+var brokerClient = &http.Client{Timeout: 10 * time.Minute}
+
 func doRaw(method, url string, body []byte) ([]byte, error) {
+	return doRawWith(httpClient, method, url, body)
+}
+
+func doRawWith(c *http.Client, method, url string, body []byte) ([]byte, error) {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
@@ -450,7 +458,7 @@ func doRaw(method, url string, body []byte) ([]byte, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := httpClient.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
 	}

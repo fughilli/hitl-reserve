@@ -107,6 +107,56 @@ and the daemon reads it on startup — so the host comes back still cordoned unt
 `POST /maintenance` (enter; `?wait=1` blocks until drained), `GET /maintenance`
 (status), `POST /maintenance/release` (leave).
 
+### Logic-analyzer ops
+
+`POST /shared/logic-analyzer` (or `hitl shared logic-analyzer --unit U '<body>'`)
+takes an `op`:
+
+- `capture` (default) — one triggered capture of the unit's line, decoded by
+  sigrok: `{"op":"capture","unit":"c6-a","samples":5000000}` →
+  `{"unit","protocol","pixels":[{r,g,b}…],"sample_rate"}` (`save_sr` adds the raw
+  `.sr`, base64).
+- `timing` — a long, **untriggered, streamed** capture of a WS2812 line for
+  diagnosing transmit glitches (mid-frame stalls, early latches, runt frames).
+  sigrok-cli streams raw samples (`-O binary`) into an in-process run-length
+  segmenter, so memory scales with frames, not samples (`shared/analyzer/timing.go`).
+
+  ```jsonc
+  {"op":"timing","unit":"c6-a",
+   "duration_ms":15000,        // or "samples"; capped at timing_max_ms (default 60000)
+   "samplerate":"12m",         // default: the broker's timing_samplerate (12m)
+   "reset_us":50,              // LOW >= this ends a frame (set ~280 for WS2812B-V5)
+   "gap_threshold_us":20,      // intra-frame LOWs >= this are listed as gaps
+   "split_gap_us":1000,        // frames preceded by a shorter LOW are flagged short_gap_before
+   "bit_threshold_ns":0,       // 0/1 split; 0 = adaptive (Otsu over HIGH widths)
+   "include_frames":true, "anomalies_only":false, "max_frames":20000,
+   "include_pixels":false, "max_pixel_frames":64,
+   "include_edges":false, "edges_format":"uvarint", "max_edges":2000000}
+  ```
+
+  The response has `capture` (samplerate, requested vs received samples,
+  `duration_ms`/`wall_ms`/`stream_ms`, `short_capture`, `drop_suspected` + `notes`,
+  `sigrok_log`), `summary` (frame count, modal LED count + `led_histogram`, runt /
+  oversize / partial-bit / gap / short-gap-before / bad-bit frame counts,
+  `period_us`/`duration_us`/`gap_before_us`/`intra_gap_max_us` and bit-level
+  `t0h_ns`/`t1h_ns`/`low_ns`/`bit_period_ns` as `{n,min,median,p99,max}`), `frames`
+  (`start_us`, `duration_us`, `gap_before_us`, `period_us`, `bits`, `leds`,
+  `trailing_bits`, `max_intra_gap_us`, `gaps:[{at_us,len_us,bit}]`, `flags`, optional
+  `pixels`) and, with `include_edges`, `edges` — alternating-level run lengths in
+  samples from `start_level`, uvarint-packed + base64 (`analyzer.DecodeUvarintRuns`)
+  or a JSON array. A stall longer than `reset_us` latches the strip early, which
+  shows up as one transmitted frame split into two `runt` frames, the second flagged
+  `short_gap_before`; a stall shorter than it is an `intra_gap`. Frames cut by the
+  capture window are flagged `truncated` and excluded from the per-frame stats.
+
+  Drops: fx2lafw does not splice silently — on a USB overrun the acquisition aborts
+  early, so `short_capture` (received < requested) is the primary signal;
+  `drop_suspected` also fires if the stream lagged real time or sigrok logged a
+  transfer/overflow error. 12 MHz (12 MB/s, 83 ns resolution) is the default: ample
+  for WS2812's ±150 ns tolerance and well inside USB2 on a Pi whose bus is shared
+  with Ethernet; higher rates may abort on a Pi 3.
+- `map.get` / `map.set` — read / replace the unit→channel map.
+
 ## Declaring your hardware
 
 The catalog is declarative JSON. The four hardware scenarios in one file:
