@@ -149,6 +149,19 @@ takes an `op`:
   `short_gap_before`; a stall shorter than it is an `intra_gap`. Frames cut by the
   capture window are flagged `truncated` and excluded from the per-frame stats.
 
+  **Multiple lines, one clock.** A unit mapped to several ws2812 channels — or any
+  request naming `"channels":["D6","D7"]` (a per-request override; the rig-wide map
+  is untouched) — captures ALL of them in ONE acquisition: the raw sample word
+  already carries every Dn bit (no extra USB bandwidth within D0-D7), and each
+  channel gets its own segmenter. The top-level fields stay the primary (first)
+  channel's, exactly as before, and the response adds `channels: [{channel,
+  capture, summary, frames, frames_listed, edges}, …]` (primary first). Every
+  frame carries `channel` and `start_sample` (samples since the capture's first
+  sample), so frame boundaries compare directly across channels — e.g. two
+  fixtures' LED frames for a cross-fixture time-base skew. The `capture` op
+  likewise decodes each channel of a multi-channel ws2812 map from its one `.sr`
+  into `channels: [{channel, pixels}]` (only the primary triggers).
+
   Drops: fx2lafw does not splice silently — on a USB overrun the acquisition aborts
   early, so `short_capture` (received < requested) is the primary signal;
   `drop_suspected` also fires if the stream lagged real time or sigrok logged a
