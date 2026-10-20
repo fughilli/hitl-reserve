@@ -106,6 +106,8 @@ type TimingGap struct {
 // TimingFrame is one segmented frame. Times are microseconds from the first sample.
 type TimingFrame struct {
 	Index         int         `json:"index"`
+	Channel       string      `json:"channel,omitempty"`   // analyzer channel, e.g. "D6" (set by the timing op)
+	StartSample   int64       `json:"start_sample"`        // first rising edge, in samples since the capture's first sample (one clock for every channel of a capture)
 	StartUs       float64     `json:"start_us"`            // first rising edge
 	DurationUs    float64     `json:"duration_us"`         // first rising edge → last falling edge
 	GapBeforeUs   *float64    `json:"gap_before_us"`       // LOW preceding the frame (null when the capture started there)
@@ -401,6 +403,7 @@ func (a *TimingAnalyzer) result() *TimingAnalysis {
 	var periods, durs, gapsBefore, intraMax []float64
 	for i, f := range a.frames {
 		f.LEDs, f.TrailingBits = f.Bits/24, f.Bits%24
+		f.StartSample = f.startSample
 		f.StartUs = a.us(f.startSample)
 		f.DurationUs = a.us(f.endSample - f.startSample)
 		if i > 0 {

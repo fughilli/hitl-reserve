@@ -18,6 +18,7 @@ go_test(
     name = "analyzer_test",
     srcs = [
         "analyzer_test.go",
+        "multichannel_test.go",
         "timing_bench_test.go",
         "timing_test.go",
     ],

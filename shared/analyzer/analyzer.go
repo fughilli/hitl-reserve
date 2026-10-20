@@ -220,6 +220,11 @@ type CaptureRequest struct {
 	Protocol string `json:"protocol,omitempty"` // overrides the mapping's protocol
 	Samples  int    `json:"samples,omitempty"`  // 0 = the broker default
 	SaveSR   bool   `json:"save_sr,omitempty"`  // include the raw .sr session (base64)
+
+	// Channels overrides the mapping's channel list for this one request, e.g.
+	// ["D6","D7"] to capture two units' WS2812 lines in one acquisition without
+	// touching the rig-wide map. The first is the primary (trigger / top-level).
+	Channels []string `json:"channels,omitempty"`
 }
 
 // Pixel is one decoded LED, 8-bit per channel in logical RGB order.
@@ -237,6 +242,16 @@ type CaptureResult struct {
 	Bytes      []byte  `json:"bytes,omitempty"` // raw MOSI bytes for spi-raw (base64 in JSON)
 	SampleRate int     `json:"sample_rate,omitempty"`
 	SR         string  `json:"sr,omitempty"` // base64 .sr session when SaveSR
+	// Channels is set for a multi-channel ws2812 capture: each channel decoded
+	// from the same acquisition (the primary first, mirroring Pixels). Only the
+	// primary channel triggers, so another channel's frame may be cut short.
+	Channels []CaptureChannel `json:"channels,omitempty"`
+}
+
+// CaptureChannel is one channel's decode in a multi-channel ws2812 capture.
+type CaptureChannel struct {
+	Channel string  `json:"channel"`
+	Pixels  []Pixel `json:"pixels"`
 }
 
 // Access implements shared.Broker: dispatch on the request Op.
@@ -292,6 +307,9 @@ func (b *Broker) capture(ctx context.Context, req CaptureRequest) (*CaptureResul
 	if m.Protocol == "" {
 		m.Protocol = ProtocolWS2812
 	}
+	if len(req.Channels) > 0 {
+		m.Channels = requestChannels(m, req)
+	}
 	samples := req.Samples
 	if samples <= 0 {
 		samples = b.cfg.Samples
@@ -327,6 +345,18 @@ func (b *Broker) capture(ctx context.Context, req CaptureRequest) (*CaptureResul
 			return nil, err
 		}
 		res.Pixels = pixels
+		// WS2812 is one line per channel: decode every other mapped channel from
+		// the same acquisition too (the rgb decoder takes one din at a time).
+		if m.Protocol == ProtocolWS2812 && len(m.Channels) > 1 {
+			res.Channels = []CaptureChannel{{Channel: m.Channels[0], Pixels: pixels}}
+			for _, ch := range m.Channels[1:] {
+				px, err := b.decodeSR(ctx, srPath, UnitMap{Channels: []string{ch}, Protocol: ProtocolWS2812})
+				if err != nil {
+					return nil, fmt.Errorf("decode %s: %w", ch, err)
+				}
+				res.Channels = append(res.Channels, CaptureChannel{Channel: ch, Pixels: px})
+			}
+		}
 	}
 	if req.SaveSR {
 		raw, err := os.ReadFile(srPath)

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// The "timing" op: stream a long untriggered capture of one WS2812 line through
+// The "timing" op: stream a long untriggered capture of one or more WS2812 lines through
 // sigrok-cli's raw binary output, run-length it in-process (EdgeExtractor) and
 // segment it into frames (TimingAnalyzer). Unlike "capture" (one triggered frame,
 // buffered to a .sr and decoded by sigrok's rgb_led_ws281x), nothing is buffered
@@ -66,9 +66,53 @@ type TimingResult struct {
 	FramesListed    int            `json:"frames_listed"`
 	FramesTruncated bool           `json:"frames_truncated,omitempty"` // hit max_frames
 	Edges           *TimingEdges   `json:"edges,omitempty"`
+	// Channels is set when more than one channel was captured: one block per
+	// channel (the primary first, mirroring the top-level fields), all on one
+	// sample clock. Absent for a single-channel capture.
+	Channels []*TimingChannel `json:"channels,omitempty"`
 }
 
-// timing runs one timing capture for a unit.
+// TimingChannel is one channel's slice of a multi-channel timing capture. Every
+// channel of one capture shares ONE sample clock (one acquisition, one stream), so
+// start_us / start_sample are directly comparable across channels.
+type TimingChannel struct {
+	Channel         string         `json:"channel"`
+	Capture         TimingCapture  `json:"capture"`
+	Summary         TimingSummary  `json:"summary"`
+	Frames          []*TimingFrame `json:"frames,omitempty"`
+	FramesListed    int            `json:"frames_listed"`
+	FramesTruncated bool           `json:"frames_truncated,omitempty"`
+	Edges           *TimingEdges   `json:"edges,omitempty"`
+}
+
+// requestChannels resolves which channel(s) a capture/timing request covers: the
+// request's explicit `channels`, else the unit mapping's. Names are normalized
+// ("d6" -> "D6") and duplicates dropped, order kept: the first is the primary.
+func requestChannels(m UnitMap, req CaptureRequest) []string {
+	src := m.Channels
+	if len(req.Channels) > 0 {
+		src = req.Channels
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range src {
+		c = strings.ToUpper(strings.TrimSpace(c))
+		if c == "" || seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	return out
+}
+
+// timing runs one timing capture for a unit. A WS2812 unit mapped to (or a request
+// naming) several channels gets ALL of them from ONE acquisition: one sigrok
+// stream (bit i = Di) fanned out to a per-channel segmenter, so every channel's
+// frame times are on the same sample clock. The top-level fields describe the
+// primary (first) channel exactly as a single-channel capture does, so
+// single-channel callers see no change; `channels` lists every channel's result
+// (primary included) and every frame is tagged with its channel.
 func (b *Broker) timing(ctx context.Context, req CaptureRequest, o TimingOptions) (*TimingResult, error) {
 	m := b.mapping(req.Unit)
 	if p := Protocol(req.Protocol); p != "" {
@@ -77,13 +121,22 @@ func (b *Broker) timing(ctx context.Context, req CaptureRequest, o TimingOptions
 	if m.Protocol != "" && m.Protocol != ProtocolWS2812 {
 		return nil, fmt.Errorf("timing op supports ws2812 lines only (unit is %s)", m.Protocol)
 	}
-	if len(m.Channels) == 0 {
+	chans := requestChannels(m, req)
+	if len(chans) == 0 {
 		return nil, errors.New("no analyzer channels mapped for this unit")
 	}
-	ch := m.Channels[0]
-	chIdx, err := channelIndex(ch)
-	if err != nil {
-		return nil, err
+	idx := make([]int, len(chans))
+	unitsize := 1
+	for i, ch := range chans {
+		n, err := channelIndex(ch)
+		if err != nil {
+			return nil, err
+		}
+		idx[i] = n
+		// fx2lafw runs 8-bit (unitsize 1) for D0-D7 and 16-bit once any D8+ is on.
+		if n >= 8 {
+			unitsize = 2
+		}
 	}
 	rateStr := o.SampleRate
 	if rateStr == "" {
@@ -126,32 +179,63 @@ func (b *Broker) timing(ctx context.Context, req CaptureRequest, o TimingOptions
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Single channel: fx2lafw runs 8-bit (unitsize 1) for D0-D7 and 16-bit for D8+.
-	// The binary output is the raw logic payload, bit i = channel Di.
-	unitsize := 1
-	if chIdx >= 8 {
-		unitsize = 2
-	}
+	// The binary output is the raw logic payload, bit i = channel Di, whichever
+	// subset is enabled: N channels (all within D0-D7) cost the same USB bandwidth
+	// as one, and share one sample clock.
 	args := []string{
 		"--driver", b.cfg.Driver,
 		"--config", "samplerate=" + rateStr,
-		"--channels", ch,
+		"--channels", strings.Join(chans, ","),
 		"--samples", strconv.FormatInt(samples, 10),
 		"-O", "binary",
 	}
-	an := NewTimingAnalyzer(p)
-	ex := NewEdgeExtractor(unitsize, chIdx, an.Run)
-	st, err := streamCmd(ctx, b.cfg.SigrokCLI, args, ex)
+	ans := make([]*TimingAnalyzer, len(chans))
+	exs := make([]*EdgeExtractor, len(chans))
+	ws := make([]io.Writer, len(chans))
+	for i := range chans {
+		ans[i] = NewTimingAnalyzer(p)
+		exs[i] = NewEdgeExtractor(unitsize, idx[i], ans[i].Run)
+		ws[i] = exs[i]
+	}
+	sink := ws[0]
+	if len(ws) > 1 {
+		sink = io.MultiWriter(ws...)
+	}
+	st, err := streamCmd(ctx, b.cfg.SigrokCLI, args, sink)
 	if err != nil {
 		return nil, err
 	}
-	got := ex.Close()
-	res := an.Finish()
+	var got int64
+	for _, ex := range exs {
+		got = ex.Close() // identical for every channel: they read the same stream
+	}
+	if got == 0 {
+		return nil, fmt.Errorf("no samples received from sigrok-cli on %s (%s)", strings.Join(chans, ","), strings.TrimSpace(st.stderrTail))
+	}
 
+	blocks := make([]*TimingChannel, len(chans))
+	for i, ch := range chans {
+		blocks[i] = timingChannelResult(ch, ans[i].Finish(), o, st, rate, samples, got)
+	}
+	pr := blocks[0]
+	out := &TimingResult{
+		Unit: req.Unit, Protocol: string(ProtocolWS2812),
+		Capture: pr.Capture, Summary: pr.Summary, Frames: pr.Frames,
+		FramesListed: pr.FramesListed, FramesTruncated: pr.FramesTruncated, Edges: pr.Edges,
+	}
+	if len(blocks) > 1 {
+		out.Channels = blocks
+	}
+	return out, nil
+}
+
+// timingChannelResult assembles one channel's capture metadata + analysis and
+// tags its frames with the channel name.
+func timingChannelResult(ch string, res *TimingAnalysis, o TimingOptions, st streamStats, rate int, requested, got int64) *TimingChannel {
 	c := TimingCapture{
 		Channel:          ch,
 		SampleRate:       rate,
-		RequestedSamples: samples,
+		RequestedSamples: requested,
 		Samples:          got,
 		DurationMs:       round3(float64(got) * 1000 / float64(rate)),
 		WallMs:           round3(st.wall.Seconds() * 1000),
@@ -159,11 +243,10 @@ func (b *Broker) timing(ctx context.Context, req CaptureRequest, o TimingOptions
 		SigrokLog:        st.stderrTail,
 	}
 	judgeDrops(&c, st.stderrTail, res.Summary.Bit)
-	if got == 0 {
-		return nil, fmt.Errorf("no samples received from sigrok-cli on %s (%s)", ch, strings.TrimSpace(st.stderrTail))
+	for _, f := range res.Frames {
+		f.Channel = ch
 	}
-
-	out := &TimingResult{Unit: req.Unit, Protocol: string(ProtocolWS2812), Capture: c, Summary: res.Summary, Edges: res.Edges}
+	out := &TimingChannel{Channel: ch, Capture: c, Summary: res.Summary, Edges: res.Edges}
 	if o.IncludeFrames == nil || *o.IncludeFrames {
 		maxF := o.MaxFrames
 		if maxF <= 0 {
@@ -182,7 +265,7 @@ func (b *Broker) timing(ctx context.Context, req CaptureRequest, o TimingOptions
 		}
 		out.FramesListed = len(out.Frames)
 	}
-	return out, nil
+	return out
 }
 
 // judgeDrops fills ShortCapture / DropSuspected / Notes.
