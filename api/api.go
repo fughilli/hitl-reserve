@@ -187,6 +187,12 @@ type Status struct {
 	LeaseSeconds int                  `json:"lease_seconds"`          // heartbeat lease window
 	FreeUnits    int                  `json:"free_units"`             // units immediately available
 	QueueLength  int                  `json:"queue_length"`           // waiters not yet assigned a unit
+	// MaxConcurrent is the host-wide cap on concurrently-active reservations (0 =
+	// unlimited); MaxConcurrentPerClass the per-unit-class (unit type) caps layered
+	// under it. Informational, so a client can tell "queued behind a cap" from
+	// "queued behind busy units".
+	MaxConcurrent         int            `json:"max_concurrent,omitempty"`
+	MaxConcurrentPerClass map[string]int `json:"max_concurrent_per_class,omitempty"`
 	// Cordoned is true when the host is in maintenance mode: no queued reservation
 	// will activate until it is uncordoned (existing active ones keep running).
 	Cordoned bool `json:"cordoned,omitempty"`

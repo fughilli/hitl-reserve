@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "main.go",
         "status_page.go",
+        "wifi_routes.go",
     ],
     importpath = "github.com/fughilli/hitl-reserve/cmd/hitl-reserved",
     visibility = ["//visibility:private"],
@@ -18,6 +19,7 @@ go_library(
         "//runner",
         "//shared",
         "//shared/analyzer",
+        "//wifi",
     ],
 )
 
@@ -32,6 +34,7 @@ go_test(
     srcs = [
         "maintenance_test.go",
         "status_page_test.go",
+        "wifi_routes_test.go",
     ],
     embed = [":hitl-reserved_lib"],
     deps = [
@@ -39,5 +42,6 @@ go_test(
         "//engine",
         "//runner",
         "//shared",
+        "//wifi",
     ],
 )

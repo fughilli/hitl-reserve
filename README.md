@@ -52,6 +52,7 @@ Extracted from [`fughilli/splanc`](https://github.com/fughilli/splanc)'s
 | [`runner`](runner/runner.go) | Pluggable execution backend (`Runner`); [`podman`](runner/podman.go) reference impl attaches a unit's components and publishes an sshd port. |
 | [`shared`](shared/shared.go) | Shared-resource broker framework; [`shared/analyzer`](shared/analyzer/analyzer.go) is a full example (logic analyzer). |
 | [`discovery`](discovery/discovery.go) | Optional live USB auto-discovery of boards. |
+| [`wifi`](wifi/wifi.go) | AP per-station stats (`iw station dump`) scoped to a reservation's stations. |
 | [`pool`](pool/pool.go) | Client-side multi-host selection ($HITL_HOSTS). |
 | [`metrics`](metrics/metrics.go) | Prometheus text exposition (stdlib). See [observability](observability/). |
 | [`cmd/hitl-reserved`](cmd/hitl-reserved/main.go) | The reservation daemon. |
@@ -106,6 +107,22 @@ and the daemon reads it on startup — so the host comes back still cordoned unt
 `GET /maintenance` returns `{cordoned, active, queued, drained}`. Endpoints:
 `POST /maintenance` (enter; `?wait=1` blocks until drained), `GET /maintenance`
 (status), `POST /maintenance/release` (leave).
+
+### Wi-Fi station stats
+
+On a host that runs the DUTs' access point, `--wifi-iface IFACE` (plus optional
+`--wifi-leases`, default `/var/lib/NetworkManager/dnsmasq-IFACE.leases`, and `--iw`)
+serves the AP's per-station link stats from `iw dev IFACE station dump`, scoped to
+one reservation: `GET /reservation/{id}/wifi` returns `{reservation, unit, iface,
+time, stations: [{mac, ip, hostname, signal_dbm, signal_avg_dbm, tx_bitrate_mbps,
+rx_bitrate_mbps, tx_retries, tx_failed, tx/rx_packets, tx/rx_bytes, inactive_ms,
+connected_secs, raw}], missing}`. A reservation owns its unit's network-component
+addresses automatically, and claims a USB board's station by IP with
+`POST /reservation/{id}/wifi {"ip": "…"}` (the holder knows the IP it provisioned the
+board to; the daemon doesn't, since a board may pick a fresh MAC each boot). Claims
+are exclusive among active reservations (409 on a station another one owns), lapse
+when the reservation ends, and need the reservation to be active (409 while queued);
+a report never contains another reservation's stations. 501 without `--wifi-iface`.
 
 ### Logic-analyzer ops
 
