@@ -76,6 +76,26 @@ running, and the rest wait in the admission queue and start as active ones relea
 peak-concurrency shaping, not admission fairness: FIFO order and best-fit placement
 are unchanged; only the number of simultaneously-live slots is capped.
 
+### Per-class concurrency caps
+
+`--max-concurrent-class TYPE=N` (repeatable or comma-separated;
+`WithMaxConcurrentPerClass`) caps active reservations per unit **class** — the unit's
+`type` (e.g. `esp32c6`, `led-mapper-pi`) — layered under `--max-concurrent`. Use it
+when the resource worth protecting belongs to one class (the USB bus the USB boards
+share) and a host-wide cap would let one class's jobs idle another class's free units
+(two network-DUT jobs holding a host cap of 2 while the USB boards sat free). An
+unlisted class is bounded only by the host cap and its unit count.
+
+Fairness: admission stays FIFO. Placement scans waiters in admission order and gives
+a slot to the earliest waiter that has a free, compatible unit whose class is under
+its cap; a waiter blocked only by its class cap keeps its position and is skipped, so
+there is no head-of-line blocking across classes, and within a class waiters activate
+strictly in order. Every freed slot goes to the oldest runnable waiter, so a class
+can't be starved by a stream of later arrivals of another class even when the host
+cap binds. A caps-only request several classes can serve falls through a capped-out
+class to a free unit of a class with room. `/status` reports `max_concurrent` and
+`max_concurrent_per_class`.
+
 ### Leases and reaping
 
 A reservation carries a lease. The holder (and queued waiters) heartbeat to extend

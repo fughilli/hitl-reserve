@@ -14,6 +14,7 @@ go_library(
 go_test(
     name = "engine_test",
     srcs = [
+        "class_cap_test.go",
         "engine_test.go",
         "maintenance_test.go",
         "provision_test.go",

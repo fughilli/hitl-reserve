@@ -29,7 +29,7 @@ func (noopRunner) Cleanup(context.Context) error      { return nil }
 func newMaintTestServer(t *testing.T) (*httptest.Server, *engine.Manager) {
 	t.Helper()
 	mgr := engine.New("h", time.Minute, noopRunner{}, engine.WithUnits([]runner.Unit{{Name: "u0"}}))
-	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws", identity.New(identity.ModeNone)))
+	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws", identity.New(identity.ModeNone), nil))
 	t.Cleanup(srv.Close)
 	return srv, mgr
 }

@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "wifi",
+    srcs = ["wifi.go"],
+    importpath = "github.com/fughilli/hitl-reserve/wifi",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "wifi_test",
+    srcs = ["wifi_test.go"],
+    embed = [":wifi"],
+)

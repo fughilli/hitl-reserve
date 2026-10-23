@@ -35,7 +35,42 @@ import (
 	"github.com/fughilli/hitl-reserve/runner"
 	"github.com/fughilli/hitl-reserve/shared"
 	"github.com/fughilli/hitl-reserve/shared/analyzer"
+	"github.com/fughilli/hitl-reserve/wifi"
 )
+
+// classCapFlag collects repeatable/comma-separated TYPE=N per-class caps.
+type classCapFlag struct{ m map[string]int }
+
+func (c *classCapFlag) String() string {
+	if c == nil || len(c.m) == 0 {
+		return ""
+	}
+	var parts []string
+	for k, v := range c.m {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, v))
+	}
+	sortStrings(parts)
+	return strings.Join(parts, ",")
+}
+
+func (c *classCapFlag) Set(v string) error {
+	if c.m == nil {
+		c.m = map[string]int{}
+	}
+	for _, kv := range strings.Split(v, ",") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		k, n, ok := strings.Cut(kv, "=")
+		var cap int
+		if _, err := fmt.Sscanf(n, "%d", &cap); !ok || strings.TrimSpace(k) == "" || err != nil || cap < 0 {
+			return fmt.Errorf("want TYPE=N (N >= 0), got %q", kv)
+		}
+		c.m[strings.TrimSpace(k)] = cap
+	}
+	return nil
+}
 
 // stringList collects a repeatable string flag.
 type stringList []string
@@ -65,6 +100,11 @@ func main() {
 	runnerKind := flag.String("runner", "auto", `execution backend: "podman" (Linux container per reservation), "darwin" (scoped SSH grant into a shared macOS host user — no container), or "auto" (darwin on macOS, else podman)`)
 	darwinSSHPort := flag.Int("darwin-ssh-port", 22, "host sshd port holders connect to on the darwin runner (reservations share the Mac's sshd, scoped by authorized_keys)")
 	maxConcurrent := flag.Int("max-concurrent", 0, "cap concurrently-active reservations on this host regardless of unit count (0 = unlimited); protects a weak host or a shared bus/radio from N-wide load. Surplus reservations queue and start as active ones release.")
+	var classCaps classCapFlag
+	flag.Var(&classCaps, "max-concurrent-class", "per-unit-class concurrency cap 'TYPE=N' (repeatable, or comma-separated), keyed by the unit type (e.g. esp32c6=2,led-mapper-pi=2). Layered under --max-concurrent: a class at its cap never idles another class's free units, and admission stays FIFO (within a class, strictly in order). Unlisted classes are bounded only by --max-concurrent.")
+	wifiIface := flag.String("wifi-iface", "", "the host's provisioning-AP interface (e.g. wlan0); enables GET /reservation/{id}/wifi, the AP's per-station stats (`iw dev IFACE station dump`) for the stations a reservation owns. Empty = endpoint disabled.")
+	wifiLeases := flag.String("wifi-leases", "", "dnsmasq leases file for --wifi-iface (maps a DUT's IP to its current station MAC); default /var/lib/NetworkManager/dnsmasq-IFACE.leases")
+	iwBin := flag.String("iw", "iw", "iw binary (for --wifi-iface)")
 	provSSID := flag.String("provisioning-ssid", "", "advertise this onboarding-network SSID in /status (overrides the catalog); e.g. a per-host provisioning AP")
 	provPSK := flag.String("provisioning-psk", "", "onboarding-network passphrase advertised alongside --provisioning-ssid")
 	identityMode := flag.String("identity", "", "how to attribute reservations to a person: \"tailscale\" verifies the caller's email via `tailscale whois` (the bench is reachable only over the tailnet, so this is free and unspoofable); \"\" (default) trusts the client-supplied owner_email as-is. The actor (human/agent) is always client-asserted.")
@@ -153,6 +193,9 @@ func main() {
 		log.Fatalf("unknown --runner %q (want podman|darwin|auto)", *runnerKind)
 	}
 
+	if *maxConcurrent > 0 || len(classCaps.m) > 0 {
+		log.Printf("concurrency: host cap=%d per-class=%v", *maxConcurrent, classCaps.m)
+	}
 	for _, u := range res.Units {
 		log.Printf("unit: name=%s type=%s kind=%s ssh-port=%d caps=%v", u.Name, u.Type, u.Kind, u.SSHPort, u.Capabilities)
 	}
@@ -166,6 +209,7 @@ func main() {
 		engine.WithSharedResources(res.Registry.Describe()),
 		engine.WithProvisioningNetwork(provision),
 		engine.WithMaxConcurrent(*maxConcurrent),
+		engine.WithMaxConcurrentPerClass(classCaps.m),
 		engine.WithStateDir(*stateDir),
 	)
 
@@ -201,7 +245,16 @@ func main() {
 
 	idResolver := identity.New(identity.Mode(*identityMode))
 	log.Printf("identity attribution: mode=%q", *identityMode)
-	srv := &http.Server{Addr: *addr, Handler: routes(ctx, mgr, res.Registry, ws, idResolver)}
+	var stations *wifi.Stations
+	if *wifiIface != "" {
+		leases := *wifiLeases
+		if leases == "" {
+			leases = "/var/lib/NetworkManager/dnsmasq-" + *wifiIface + ".leases"
+		}
+		stations = wifi.New(*wifiIface, leases, *iwBin)
+		log.Printf("wifi: station stats enabled (iface=%s leases=%s)", *wifiIface, leases)
+	}
+	srv := &http.Server{Addr: *addr, Handler: routes(ctx, mgr, res.Registry, ws, idResolver, stations)}
 	go func() {
 		<-ctx.Done()
 		sc, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -299,8 +352,9 @@ func sortStrings(s []string) {
 	}
 }
 
-func routes(ctx context.Context, mgr *engine.Manager, reg *shared.Registry, workspace string, idResolver *identity.Resolver) http.Handler {
+func routes(ctx context.Context, mgr *engine.Manager, reg *shared.Registry, workspace string, idResolver *identity.Resolver, stations *wifi.Stations) http.Handler {
 	mux := http.NewServeMux()
+	wifiRoutes(mux, mgr, stations)
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

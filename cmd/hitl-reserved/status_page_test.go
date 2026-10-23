@@ -36,7 +36,7 @@ func newTestServer(t *testing.T) (*httptest.Server, string) {
 	if res.State != api.StateActive {
 		t.Fatalf("reservation should be active, got %s", res.State)
 	}
-	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws", identity.New(identity.ModeNone)))
+	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws", identity.New(identity.ModeNone), nil))
 	t.Cleanup(srv.Close)
 	return srv, res.ID
 }
@@ -47,7 +47,7 @@ func TestStatusPageShowsIdentity(t *testing.T) {
 		Owner: "agent-x", OwnerEmail: "kevin@example.com", Actor: "agent",
 		IdentitySource: "tailscale", SSHPublicKey: "ssh-ed25519 AAAA k",
 	})
-	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws", identity.New(identity.ModeNone)))
+	srv := httptest.NewServer(routes(context.Background(), mgr, shared.NewRegistry(), "ws", identity.New(identity.ModeNone), nil))
 	t.Cleanup(srv.Close)
 
 	body, err := io.ReadAll(mustGet(t, srv.URL+"/reservation/"+res.ID+"/status.html").Body)

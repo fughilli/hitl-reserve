@@ -59,6 +59,12 @@ type Manager struct {
 	// maxConcurrent caps how many reservations may be Active at once on this host,
 	// even when more units are free. 0 = unlimited (bounded only by unit count).
 	maxConcurrent int
+	// classCap caps how many reservations may be Active at once per unit CLASS (the
+	// unit's Type, e.g. "esp32c6" vs "led-mapper-pi"), layered under maxConcurrent.
+	// A class with no entry is bounded only by maxConcurrent and its unit count. This
+	// lets a host protect a per-class shared resource (the USB bus the USB boards
+	// share) without one class's work idling another class's free units.
+	classCap map[string]int
 
 	// stateDir is where the maintenance marker persists (empty = no persistence, the
 	// marker is kept in memory only — used by tests and marker-less deployments).
@@ -124,6 +130,24 @@ func WithHook(h Hook) Option { return func(m *Manager) { m.hook = h } }
 // active ones release, so throughput is preserved; only peak concurrency is bounded.
 func WithMaxConcurrent(n int) Option {
 	return func(m *Manager) { m.maxConcurrent = n }
+}
+
+// WithMaxConcurrentPerClass caps concurrently-Active reservations per unit class
+// (keyed by runner.Unit.Type), under the host-wide WithMaxConcurrent cap. A class
+// absent from caps (or mapped to <= 0) is uncapped at the class level. Admission
+// stays FIFO: a queued reservation whose candidate units are all in a capped-out
+// class is skipped (it keeps its position) and the earliest waiter that CAN run
+// takes the slot, so a class at its cap never head-of-line-blocks another class's
+// free units. Within a class, waiters activate strictly in admission order.
+func WithMaxConcurrentPerClass(caps map[string]int) Option {
+	return func(m *Manager) {
+		m.classCap = map[string]int{}
+		for k, v := range caps {
+			if v > 0 {
+				m.classCap[k] = v
+			}
+		}
+	}
 }
 
 // WithStateDir sets the directory the maintenance marker persists under (see
@@ -258,6 +282,29 @@ func (m *Manager) Get(id string) (*api.Reservation, error) {
 		return v, nil
 	}
 	return nil, ErrNotFound
+}
+
+// ErrNotActive is returned for a reservation that exists but is still queued.
+var ErrNotActive = errors.New("reservation is not active")
+
+// ActiveUnit returns a copy of the unit an ACTIVE reservation holds. It returns
+// ErrNotFound for an unknown id and ErrNotActive for a queued one.
+func (m *Manager) ActiveUnit(id string) (runner.Unit, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r := m.findLocked(id)
+	if r == nil {
+		return runner.Unit{}, ErrNotFound
+	}
+	if r.State != api.StateActive {
+		return runner.Unit{}, ErrNotActive
+	}
+	for _, u := range m.units {
+		if u.Name == r.Unit {
+			return u, nil
+		}
+	}
+	return runner.Unit{Name: r.Unit, Type: r.UnitType}, nil
 }
 
 // Heartbeat extends a reservation's lease (queued or active).
@@ -421,13 +468,20 @@ func (m *Manager) Status() api.Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s := api.Status{
-		Host:         m.host,
-		Workspace:    m.workspace,
-		LeaseSeconds: int(m.lease.Seconds()),
-		Shared:       m.shared,
-		Provisioning: m.provision,
-		Cordoned:     m.cordoned,
-		Draining:     m.cordoned && m.anyActiveLocked(),
+		Host:          m.host,
+		Workspace:     m.workspace,
+		LeaseSeconds:  int(m.lease.Seconds()),
+		Shared:        m.shared,
+		Provisioning:  m.provision,
+		Cordoned:      m.cordoned,
+		Draining:      m.cordoned && m.anyActiveLocked(),
+		MaxConcurrent: m.maxConcurrent,
+	}
+	if len(m.classCap) > 0 {
+		s.MaxConcurrentPerClass = map[string]int{}
+		for k, v := range m.classCap {
+			s.MaxConcurrentPerClass[k] = v
+		}
 	}
 	holders := map[string]*api.Reservation{}
 	for _, r := range m.items {
@@ -779,9 +833,11 @@ func (m *Manager) nextAssignmentLocked() (*runner.Unit, *api.Reservation) {
 		return nil, nil
 	}
 	busy := map[string]bool{}
+	activeByClass := map[string]int{}
 	for _, r := range m.items {
 		if r.State == api.StateActive {
 			busy[r.Unit] = true
+			activeByClass[r.UnitType]++
 		}
 	}
 	// Per-host concurrency cap: don't activate beyond maxConcurrent environments at
@@ -791,6 +847,11 @@ func (m *Manager) nextAssignmentLocked() (*runner.Unit, *api.Reservation) {
 	if m.maxConcurrent > 0 && len(busy) >= m.maxConcurrent {
 		return nil, nil
 	}
+	// Admission order is the fairness rule: the EARLIEST queued waiter that has a free,
+	// compatible unit in a class below its cap wins. A waiter blocked only by its
+	// class cap keeps its position and is skipped (no head-of-line blocking across
+	// classes); since every freed slot goes to the oldest runnable waiter, no class
+	// can be starved by a stream of later arrivals of another class.
 	for _, r := range m.items {
 		if r.State != api.StateQueued {
 			continue
@@ -800,6 +861,9 @@ func (m *Manager) nextAssignmentLocked() (*runner.Unit, *api.Reservation) {
 		for i := range m.units {
 			if busy[m.units[i].Name] || !m.unitServesLocked(&m.units[i], r) {
 				continue
+			}
+			if c, ok := m.classCap[m.units[i].Type]; ok && activeByClass[m.units[i].Type] >= c {
+				continue // this unit's class is at its concurrency cap
 			}
 			// Best-fit: the free unit with the fewest capabilities beyond what this
 			// reservation requires, so scarce over-provisioned units stay free for the
