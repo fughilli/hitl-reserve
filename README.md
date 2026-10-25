@@ -81,6 +81,7 @@ Reserve from a client:
 export HITL_HOSTS="rig-1,rig-2"        # comma/space list; bare host → http://host:8087
 
 hitl status                            # show every host's units and shared resources
+hitl queue                             # queue depth per class + ETA per unit type (cheap)
 hitl reserve --type esp32c6            # queue for any free ESP32-C6, SSH in, release on exit
 hitl reserve --caps sdr,led-strip      # queue for a unit with these capabilities (best-fit)
 hitl reserve --unit c6-b+sdr -- ./run-my-test.sh   # pin a composite; run a command; release
@@ -94,6 +95,55 @@ hitl maintenance --release             # lift the cordon; queued reservations re
 The client generates a throwaway SSH keypair per reservation, authorizes it on the
 unit's environment, heartbeats to hold the lease, and releases on exit. See
 [`docs/DESIGN.md`](docs/DESIGN.md) for the environment image contract.
+
+### Priority classes, ETA and back-off
+
+A reservation carries a scheduling class (`"priority"` in `POST /reserve`, `hitl
+reserve --priority`, default `$HITL_PRIORITY` or `dev`):
+
+| class | for | aging offset (default) |
+| --- | --- | --- |
+| `merge-queue` | merge-critical CI: merge-queue (`merge_group`) runs and the post-merge run on main | 0 |
+| `pr-ci` | ordinary PR CI and periodic CI | 20 min (`--priority-aging pr-ci=…`) |
+| `dev` | agents and humans developing (the default, and what an old client gets) | 60 min (`--priority-aging dev=…`) |
+
+The queue is ordered by **virtual arrival** = arrival + the class's aging offset
+(FIFO within a class). A higher class overtakes a lower one only if it arrives
+within the lower one's offset, so CI goes first during a burst but can hold a dev
+reservation back by at most its offset plus the work already ahead of it; dev never
+starves. Classes only reorder the **queue**: an active reservation is never
+preempted. Aging was chosen over a reserved per-class share because it is
+work-conserving (no boards idle "for dev" outside bursts) and has one explicit bound
+per class.
+
+A queued reservation (`GET /reservation/{id}`) reports `priority`, `position` (1 =
+next in line for its units; only waiters competing for the same units count),
+`eta_seconds` (a list-scheduling estimate from the units' recent mean hold and the
+current holders' age; an estimate, a higher class can still arrive), `progress_at` /
+`since_progress_seconds` (when its position last dropped or a unit it can use was
+freed — the queue draining for it; frozen while cordoned) and `blocked`
+(`cordoned` / `no-unit`). Clients should wait while the queue makes progress and give
+up on a **stall** (no progress for a long while), not on elapsed time. A daemon
+without this support omits these fields and ignores `priority` (plain FIFO).
+
+**`GET /queue` / `hitl queue`** is the cheap, reservation-free view: per class the
+queue depth, oldest wait and aging offset; per unit type the units/free/queued counts,
+the mean hold, `eta_new_seconds` (the wait a reservation of each class would face if
+enqueued now) and `retry_after_seconds`, the dev back-off hint.
+
+**Back-off convention (dev reservations — agents and humans).**
+
+1. Before reserving, check `hitl queue` (or `GET /queue` on each host). If some host
+   reports `retry_after_seconds == 0` for your unit type, reserve there.
+2. Otherwise don't enqueue: sleep `retry_after_seconds` (≤ 10 min) plus ±20%
+   jitter and check again. Give up backing off after ~30 min and enqueue anyway —
+   aging then guarantees you a turn.
+3. Hold at most one queued reservation per task; never queue on several hosts at
+   once "to see which wins".
+4. To abandon a queued reservation, release it (`hitl release <id>`); never kill a
+   queued client, which leaves the slot to be reaped only when its lease lapses.
+
+CI does not back off: it reserves with `merge-queue` / `pr-ci` and waits on progress.
 
 ### Maintenance mode
 

@@ -7,6 +7,7 @@
 //
 //	hitl reserve [--unit N | --type T | --caps a,b] [--host URL] [-- CMD...]
 //	hitl status  [--host URL]        # or all hosts in the pool
+//	hitl queue   [--host URL] [--json]   # queue depth per class + ETA per unit type (cheap)
 //	hitl release <id> [--host URL]
 //	hitl shared  <name> [--host URL] [--unit U] [BODY|-]   # broker access (e.g. analyzer capture)
 //	hitl maintenance [--release | --status] [--host URL]   # cordon + drain the host for maintenance
@@ -42,6 +43,8 @@ func main() {
 		err = cmdReserve(os.Args[2:])
 	case "status":
 		err = cmdStatus(os.Args[2:])
+	case "queue":
+		err = cmdQueue(os.Args[2:])
 	case "release":
 		err = cmdRelease(os.Args[2:])
 	case "shared":
@@ -65,8 +68,10 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `hitl — reservation client
 
-  hitl reserve [--unit N | --type T | --caps a,b] [--host URL] [--owner S] [-- CMD...]
+  hitl reserve [--unit N | --type T | --caps a,b] [--host URL] [--owner S]
+               [--priority merge-queue|pr-ci|dev] [-- CMD...]
   hitl status  [--host URL]
+  hitl queue   [--host URL] [--json]
   hitl release <id> [--host URL]
   hitl shared  <name> [--host URL] [--unit U] [BODY|-]
   hitl maintenance [--release | --status] [--host URL]
@@ -91,10 +96,17 @@ func cmdReserve(args []string) error {
 	actor := fs.String("actor", envOr("HITL_ACTOR", "human"),
 		"who is reserving: \"human\" (a person at a keyboard) or \"agent\" (automation acting "+
 			"on the owner's behalf); default $HITL_ACTOR or human")
+	priority := fs.String("priority", envOr("HITL_PRIORITY", api.PriorityDev),
+		"scheduling class: merge-queue (merge-critical CI), pr-ci, or dev (default $HITL_PRIORITY or dev). "+
+			"Classes reorder the queue only; an active reservation is never preempted.")
 	fs.Parse(args)
 	cmd := fs.Args()
 
 	reqCaps := splitCSV(*caps)
+	class, known := api.NormalizePriority(*priority)
+	if !known {
+		return fmt.Errorf("unknown --priority %q (want one of %v)", *priority, api.PriorityClasses)
+	}
 
 	// Generate a throwaway keypair for this reservation.
 	keyDir, priv, pub, err := genKey()
@@ -111,6 +123,7 @@ func cmdReserve(args []string) error {
 	body, _ := json.Marshal(api.ReserveRequest{
 		Owner: *owner, OwnerEmail: *ownerEmail, Actor: *actor,
 		SSHPublicKey: pub, Unit: *unit, UnitType: *typ, RequireCaps: reqCaps,
+		Priority: class,
 	})
 	var res api.Reservation
 	if err := doJSON(http.MethodPost, base+"/reserve", body, &res); err != nil {
@@ -140,7 +153,8 @@ func cmdReserve(args []string) error {
 }
 
 func waitActive(ctx context.Context, base, id string) (*api.Reservation, error) {
-	lastPos := -1
+	lastLine := ""
+	lastPrint := time.Time{}
 	for {
 		var res api.Reservation
 		if err := doJSON(http.MethodGet, base+"/reservation/"+id, nil, &res); err != nil {
@@ -155,9 +169,10 @@ func waitActive(ctx context.Context, base, id string) (*api.Reservation, error) 
 		case api.StateReleased:
 			return nil, fmt.Errorf("reservation released before activating: %s", res.Message)
 		default:
-			if res.Position != lastPos {
-				fmt.Fprintf(os.Stderr, "queued: position %d\n", res.Position)
-				lastPos = res.Position
+			// Print on change, and at least once a minute so a long wait shows life.
+			if line := queuedLine(&res); line != lastLine || time.Since(lastPrint) >= time.Minute {
+				fmt.Fprintln(os.Stderr, line)
+				lastLine, lastPrint = line, time.Now()
 			}
 		}
 		select {
@@ -166,6 +181,22 @@ func waitActive(ctx context.Context, base, id string) (*api.Reservation, error) 
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// queuedLine renders a queued reservation's progress: position, class, ETA and
+// any blocking reason (the class/ETA parts appear only on a priority-aware daemon).
+func queuedLine(r *api.Reservation) string {
+	line := fmt.Sprintf("queued: position %d", r.Position)
+	if r.Priority != "" {
+		line += " class=" + r.Priority
+	}
+	if r.EtaSeconds != nil {
+		line += " eta~" + (time.Duration(*r.EtaSeconds) * time.Second).Round(time.Minute).String()
+	}
+	if r.Blocked != "" {
+		line += " BLOCKED(" + r.Blocked + ")"
+	}
+	return line
 }
 
 func heartbeat(ctx context.Context, base, id string, done <-chan struct{}) {
@@ -222,7 +253,15 @@ func cmdStatus(args []string) error {
 				maint = "  CORDONED (draining)"
 			}
 		}
-		fmt.Printf("%s  host=%s workspace=%s  free=%d queued=%d%s\n", base, st.Host, st.Workspace, st.FreeUnits, st.QueueLength, maint)
+		byClass := ""
+		if len(st.QueueByClass) > 0 {
+			var parts []string
+			for _, c := range api.PriorityClasses {
+				parts = append(parts, fmt.Sprintf("%s=%d", c, st.QueueByClass[c]))
+			}
+			byClass = " (" + strings.Join(parts, " ") + ")"
+		}
+		fmt.Printf("%s  host=%s workspace=%s  free=%d queued=%d%s%s\n", base, st.Host, st.Workspace, st.FreeUnits, st.QueueLength, byClass, maint)
 		for _, u := range st.Units {
 			state := "free"
 			if u.Active != nil {
@@ -245,6 +284,75 @@ func cmdStatus(args []string) error {
 		}
 	}
 	return nil
+}
+
+// --- queue ----------------------------------------------------------------
+
+// cmdQueue prints each host's cheap queue overview (GET /queue): depth per
+// priority class and, per unit type, the ETA a new reservation of each class would
+// face plus the dev back-off hint. Agents check this BEFORE reserving (see the
+// README's back-off convention) instead of piling more waiters onto a busy fleet.
+func cmdQueue(args []string) error {
+	fs, opts := commonFlags("queue")
+	asJSON := fs.Bool("json", false, "print the raw /queue JSON of every host (a JSON array)")
+	fs.Parse(args)
+	hosts := poolHosts(*opts)
+	if len(hosts) == 0 {
+		return fmt.Errorf("no hosts (set --host or $HITL_HOSTS)")
+	}
+	var all []json.RawMessage
+	for _, base := range hosts {
+		raw, err := doRaw(http.MethodGet, base+"/queue", nil)
+		if err != nil {
+			if *asJSON {
+				b, _ := json.Marshal(map[string]string{"url": base, "error": err.Error()})
+				all = append(all, b)
+			} else {
+				fmt.Printf("%s\tUNAVAILABLE (%v)\n", base, err)
+			}
+			continue
+		}
+		if *asJSON {
+			all = append(all, raw)
+			continue
+		}
+		var q api.QueueSummary
+		if err := json.Unmarshal(raw, &q); err != nil {
+			return fmt.Errorf("%s: %w", base, err)
+		}
+		printQueue(base, q)
+	}
+	if *asJSON {
+		b, _ := json.MarshalIndent(all, "", "  ")
+		fmt.Println(string(b))
+	}
+	return nil
+}
+
+func printQueue(base string, q api.QueueSummary) {
+	maint := ""
+	if q.Cordoned {
+		maint = "  CORDONED"
+	}
+	fmt.Printf("%s  host=%s  queued=%d%s\n", base, q.Host, q.QueueLength, maint)
+	for _, c := range q.Classes {
+		fmt.Printf("  class %-12s queued=%-3d oldest=%-8s aging=%s\n", c.Class, c.Queued,
+			(time.Duration(c.OldestWaitSeconds) * time.Second).String(), (time.Duration(c.AgingSeconds) * time.Second).String())
+	}
+	for _, t := range q.Types {
+		var etas []string
+		for _, c := range api.PriorityClasses {
+			if v, ok := t.EtaNewSeconds[c]; ok {
+				etas = append(etas, fmt.Sprintf("%s~%s", c, (time.Duration(v)*time.Second).Round(time.Minute)))
+			}
+		}
+		hint := "dev: go ahead"
+		if t.RetryAfterSeconds > 0 {
+			hint = fmt.Sprintf("dev: back off, retry in %s", time.Duration(t.RetryAfterSeconds)*time.Second)
+		}
+		fmt.Printf("  type  %-14s units=%d free=%d queued=%d hold~%s  eta-new[%s]  %s\n", t.Type, t.Units, t.Free, t.Queued,
+			(time.Duration(t.HoldEstimateSeconds) * time.Second).Round(time.Minute), strings.Join(etas, " "), hint)
+	}
 }
 
 // --- release --------------------------------------------------------------

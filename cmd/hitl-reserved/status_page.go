@@ -16,7 +16,8 @@ type reservationView struct {
 	R           *api.Reservation
 	Uptime      string   // humanized now-StartedAt, "" when not yet active
 	Queued      bool     // still waiting for a unit
-	Position    int      // waiters ahead when queued
+	Position    int      // queue position when queued (1 = next in line for its units)
+	ETA         string   // humanized activation estimate when queued, "" if unknown
 	AnnKeys     []string // annotation keys, sorted for stable render
 	Annotations map[string]string
 }
@@ -67,6 +68,9 @@ func newReservationView(r *api.Reservation) reservationView {
 	if r.State == api.StateQueued {
 		v.Queued = true
 		v.Position = r.Position
+		if r.EtaSeconds != nil {
+			v.ETA = humanizeDuration(time.Duration(*r.EtaSeconds) * time.Second)
+		}
 	}
 	for k := range r.Annotations {
 		v.AnnKeys = append(v.AnnKeys, k)
@@ -110,7 +114,8 @@ var reservationTmpl = template.Must(template.New("reservation").Funcs(tmplFuncs)
 {{if .R.OwnerEmail}} <tr><th>attributed to</th><td>{{.R.OwnerEmail}} <span class="muted">({{if .R.Actor}}{{.R.Actor}}{{else}}human{{end}}{{if .R.IdentitySource}}, {{.R.IdentitySource}}{{end}})</span></td></tr>
 {{end}}
 {{if .Queued}}
- <tr><th>queue position</th><td>{{.Position}} waiter(s) ahead</td></tr>
+ <tr><th>queue position</th><td>{{.Position}}{{if .R.Priority}} <span class="muted">(class {{.R.Priority}})</span>{{end}}</td></tr>
+ <tr><th>ETA</th><td>{{if .ETA}}~{{.ETA}}{{else if .R.Blocked}}blocked: {{.R.Blocked}}{{else}}<span class="muted">—</span>{{end}}</td></tr>
 {{else}}
  <tr><th>unit</th><td>{{.R.Unit}}{{if .R.UnitType}} <span class="muted">({{.R.UnitType}})</span>{{end}}</td></tr>
  <tr><th>uptime</th><td>{{if .Uptime}}{{.Uptime}}{{else}}<span class="muted">—</span>{{end}}</td></tr>

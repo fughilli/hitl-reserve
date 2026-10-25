@@ -28,6 +28,10 @@ import (
 // restart it exists to cover, until explicitly released.
 const maintenanceMarker = "maintenance"
 
+// reasonLeaseExpired is the release reason the reaper uses; such a hold's length
+// is the lease, not real work, so it is kept out of the hold-time estimate.
+const reasonLeaseExpired = "lease expired (no heartbeat)"
+
 // ErrNotFound is returned for an unknown reservation id.
 var ErrNotFound = errors.New("reservation not found")
 
@@ -85,6 +89,20 @@ type Manager struct {
 	// drained is closed (and re-made on the next cordon) whenever the active count
 	// reaches zero while cordoned, so a waiter blocking on full drain wakes.
 	drained chan struct{}
+
+	// Priority scheduling (see priority.go). aging is each class's virtual-arrival
+	// offset; holdEst the per-unit-type mean hold (ETA input); progress/lastPos the
+	// per-waiter progress clock and last computed Position.
+	now         func() time.Time
+	aging       map[string]time.Duration
+	defaultHold time.Duration
+	holdEst     map[string]time.Duration
+	progress    map[string]time.Time
+	lastPos     map[string]int
+
+	// Capacity accounting (see capacity.go).
+	capsAlias map[string]string
+	capa      capacity
 
 	// Monotonic lifecycle counters, exported via Metrics().
 	cReservations  uint64
@@ -167,6 +185,15 @@ func New(host string, lease time.Duration, run runner.Runner, opts ...Option) *M
 		keys: map[string]string{}, want: map[string]string{},
 		typ: map[string]string{}, caps: map[string][]string{},
 		drained: make(chan struct{}),
+		now:     time.Now, aging: map[string]time.Duration{}, defaultHold: DefaultHold,
+		holdEst: map[string]time.Duration{}, progress: map[string]time.Time{},
+		lastPos: map[string]int{}, capsAlias: map[string]string{}, capa: newCapacity(),
+	}
+	for k, v := range DefaultAging {
+		m.aging[k] = v
+	}
+	for k, v := range DefaultCapsClassAliases {
+		m.capsAlias[k] = v
 	}
 	for _, o := range opts {
 		o(m)
@@ -179,6 +206,7 @@ func New(host string, lease time.Duration, run runner.Runner, opts ...Option) *M
 			log.Printf("maintenance: found marker %s; starting cordoned", m.markerPath())
 		}
 	}
+	m.syncAvailLocked()
 	return m
 }
 
@@ -238,10 +266,15 @@ func (m *Manager) Reserve(ctx context.Context, req api.ReserveRequest) *api.Rese
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	now := time.Now()
+	now := m.now()
 	exp := now.Add(m.lease)
+	class, known := api.NormalizePriority(req.Priority)
+	if !known {
+		log.Printf("reserve: unknown priority %q from owner %q; using %q", req.Priority, req.Owner, class)
+	}
 	r := &api.Reservation{
 		ID:             newID(),
+		Priority:       class,
 		Owner:          req.Owner,
 		OwnerEmail:     req.OwnerEmail,
 		Actor:          req.Actor,
@@ -262,8 +295,10 @@ func (m *Manager) Reserve(ctx context.Context, req api.ReserveRequest) *api.Rese
 	}
 	m.items = append(m.items, r)
 	m.cReservations++
-	log.Printf("reserve: id=%s owner=%q unit=%q type=%q caps=%v queued (position %d)",
-		r.ID, r.Owner, req.Unit, req.UnitType, req.RequireCaps, len(m.items)-1)
+	m.capOnReserveLocked(r)
+	m.progress[r.ID] = now
+	log.Printf("reserve: id=%s owner=%q class=%s unit=%q type=%q caps=%v queued",
+		r.ID, r.Owner, class, req.Unit, req.UnitType, req.RequireCaps)
 	m.reconcileLocked(ctx)
 	if v := m.viewLocked(r.ID); v != nil {
 		return v
@@ -271,7 +306,7 @@ func (m *Manager) Reserve(ctx context.Context, req api.ReserveRequest) *api.Rese
 	// reconcile dropped it (an immediate start failed). Surface that as a released
 	// snapshot rather than nil, so the caller gets a diagnosable response.
 	return &api.Reservation{ID: r.ID, Owner: r.Owner, State: api.StateReleased, CreatedAt: now,
-		Message: "failed to start environment"}
+		Priority: class, Message: "failed to start environment"}
 }
 
 // Get returns a snapshot of one reservation.
@@ -316,7 +351,7 @@ func (m *Manager) Heartbeat(id string) error {
 		return ErrNotFound
 	}
 	if r.State == api.StateActive || r.State == api.StateQueued {
-		exp := time.Now().Add(m.lease)
+		exp := m.now().Add(m.lease)
 		r.ExpiresAt = &exp
 	}
 	return nil
@@ -331,7 +366,7 @@ func (m *Manager) AppendNote(id, author, text string) (*api.Reservation, error) 
 	if r == nil {
 		return nil, ErrNotFound
 	}
-	r.Scratchpad = append(r.Scratchpad, api.Note{Time: time.Now(), Author: author, Text: text})
+	r.Scratchpad = append(r.Scratchpad, api.Note{Time: m.now(), Author: author, Text: text})
 	return m.viewLocked(id), nil
 }
 
@@ -361,15 +396,33 @@ func (m *Manager) Release(ctx context.Context, id, reason string) error {
 	if idx < 0 {
 		return ErrNotFound
 	}
-	wasActive := m.items[idx].State == api.StateActive
+	r := m.items[idx]
+	wasActive := r.State == api.StateActive
 	m.cReleases++
-	log.Printf("release: id=%s reason=%q wasActive=%v", id, reason, wasActive)
+	log.Printf("release: id=%s class=%s reason=%q wasActive=%v", id, r.Priority, reason, wasActive)
 	if wasActive {
 		if err := m.run.Stop(ctx, id); err != nil {
 			log.Printf("release: stop environment for %s: %v", id, err)
 		}
+		if r.StartedAt != nil && reason != reasonLeaseExpired {
+			m.recordHoldLocked(r.UnitType, m.now().Sub(*r.StartedAt))
+		}
+		outcome := OutcomeReleased
+		switch reason {
+		case reasonLeaseExpired:
+			outcome = OutcomeExpired
+		case ReasonCancelled:
+			outcome = OutcomeCancelled
+		}
+		m.capOnHoldEndLocked(r, outcome)
+	} else {
+		m.capOnAbandonLocked(r)
 	}
+	unit := r.Unit
 	m.removeLocked(id)
+	if wasActive {
+		m.markUnitProgressLocked(unit) // the queue is draining for every waiter this unit serves
+	}
 	m.reconcileLocked(ctx)
 	if wasActive && !m.anyActiveLocked() {
 		m.hookAllIdle(ctx)
@@ -397,7 +450,7 @@ func (m *Manager) signalDrainedLocked() {
 // periodically. Sweeping the whole queue keeps a dead waiter from stranding a slot.
 func (m *Manager) ReapExpired(ctx context.Context) {
 	m.mu.Lock()
-	now := time.Now()
+	now := m.now()
 	var expired []string
 	for _, r := range m.items {
 		if r.ExpiresAt != nil && now.After(*r.ExpiresAt) {
@@ -407,7 +460,7 @@ func (m *Manager) ReapExpired(ctx context.Context) {
 	m.cLeaseExpiries += uint64(len(expired))
 	m.mu.Unlock()
 	for _, id := range expired {
-		_ = m.Release(ctx, id, "lease expired (no heartbeat)")
+		_ = m.Release(ctx, id, reasonLeaseExpired)
 	}
 }
 
@@ -457,6 +510,10 @@ func (m *Manager) SyncUnits(ctx context.Context, units []runner.Unit) (added, re
 		}
 	}
 	m.units = kept
+	m.syncAvailLocked()
+	for _, name := range added {
+		m.markUnitProgressLocked(name)
+	}
 	if len(added) > 0 || len(removed) > 0 || changed {
 		m.reconcileLocked(ctx)
 	}
@@ -476,6 +533,17 @@ func (m *Manager) Status() api.Status {
 		Cordoned:      m.cordoned,
 		Draining:      m.cordoned && m.anyActiveLocked(),
 		MaxConcurrent: m.maxConcurrent,
+	}
+	s.QueueByClass = map[string]int{}
+	s.PriorityAgingSeconds = map[string]int{}
+	for _, c := range api.PriorityClasses {
+		s.QueueByClass[c] = 0
+		s.PriorityAgingSeconds[c] = int(m.aging[c].Seconds())
+	}
+	for _, r := range m.items {
+		if r.State == api.StateQueued {
+			s.QueueByClass[r.Priority]++
+		}
 	}
 	if len(m.classCap) > 0 {
 		s.MaxConcurrentPerClass = map[string]int{}
@@ -554,6 +622,11 @@ type MetricsSnapshot struct {
 	// stable output.
 	Active []ActiveReservation
 
+	// Classes is one entry per scheduling class (api.PriorityClasses order).
+	Classes []ClassMetric
+	// Capacity is the demand/supply accounting (see capacity.go).
+	Capacity CapacitySnapshot
+
 	Reservations  uint64
 	Activations   uint64
 	Releases      uint64
@@ -567,7 +640,7 @@ func (m *Manager) Metrics() MetricsSnapshot {
 	defer m.mu.Unlock()
 	busy := map[string]bool{}
 	active, queued := 0, 0
-	now := time.Now()
+	now := m.now()
 	var actives []ActiveReservation
 	for _, r := range m.items {
 		switch r.State {
@@ -605,6 +678,8 @@ func (m *Manager) Metrics() MetricsSnapshot {
 		LeaseExpiries: m.cLeaseExpiries,
 		StartFailures: m.cStartFailures,
 		Active:        actives,
+		Classes:       m.classMetricsLocked(),
+		Capacity:      m.capacitySnapshotLocked(),
 	}
 	for _, u := range m.units {
 		b := busy[u.Name]
@@ -639,6 +714,7 @@ func (m *Manager) Cordon() api.Maintenance {
 			}
 		}
 		log.Printf("maintenance: cordoned (marker=%q)", m.markerPath())
+		m.syncAvailLocked()
 	}
 	// If already drained at cordon time, latch it so a waiter returns immediately.
 	if !m.anyActiveLocked() {
@@ -661,6 +737,15 @@ func (m *Manager) Uncordon(ctx context.Context) api.Maintenance {
 			}
 		}
 		log.Printf("maintenance: uncordoned; resuming activation")
+		m.syncAvailLocked()
+		// The queue resumes: restart every waiter's progress clock so the time spent
+		// cordoned doesn't read as a stall the moment it's lifted.
+		now := m.now()
+		for _, r := range m.items {
+			if r.State == api.StateQueued {
+				m.progress[r.ID] = now
+			}
+		}
 		m.reconcileLocked(ctx)
 	}
 	return m.maintenanceLocked()
@@ -739,7 +824,10 @@ func (m *Manager) viewLocked(id string) *api.Reservation {
 		return nil
 	}
 	cp := *m.items[i]
-	cp.Position = i
+	cp.Position = 0
+	if cp.State == api.StateQueued {
+		m.annotateQueuedLocked(&cp, m.queueModelLocked())
+	}
 	// Deep-copy the scratchpad and annotations so the returned snapshot never
 	// aliases the live state a later AppendNote/SetAnnotation would mutate.
 	if len(cp.Scratchpad) > 0 {
@@ -784,6 +872,9 @@ func (m *Manager) evictUnitLocked(name string) {
 	}
 	for _, id := range doomed {
 		log.Printf("evict: reservation %s dropped (unit %s removed)", id, name)
+		if r := m.findLocked(id); r != nil {
+			m.capOnAbandonLocked(r)
+		}
 		m.removeLocked(id)
 	}
 }
@@ -796,18 +887,22 @@ func (m *Manager) reconcileLocked(ctx context.Context) {
 		wasIdle := !m.anyActiveLocked()
 		unit, head := m.nextAssignmentLocked()
 		if unit == nil {
+			m.refreshProgressLocked()
 			return
 		}
+		t0 := m.now()
 		ep, err := m.run.Start(ctx, head.ID, head.Owner, m.keys[head.ID], *unit)
 		if err != nil {
 			log.Printf("reconcile: start environment for %s on %s failed: %v", head.ID, unit.Name, err)
 			m.cStartFailures++
+			m.addBusyLocked(unit.Name, head.Priority, OutcomeStartFailed, m.now().Sub(t0))
 			head.Message = "failed to start environment: " + err.Error()
 			m.removeLocked(head.ID)
 			continue
 		}
-		now := time.Now()
+		now := m.now()
 		exp := now.Add(m.lease)
+		m.observeWaitLocked(head, ResultActivated, now.Sub(head.CreatedAt))
 		head.State = api.StateActive
 		head.StartedAt = &now
 		head.ExpiresAt = &exp
@@ -815,7 +910,8 @@ func (m *Manager) reconcileLocked(ctx context.Context) {
 		head.Unit = unit.Name
 		head.UnitType = unit.Type
 		m.cActivations++
-		log.Printf("reconcile: id=%s active unit=%s endpoint=%s:%d", head.ID, unit.Name, ep.Host, ep.Port)
+		log.Printf("reconcile: id=%s class=%s active unit=%s endpoint=%s:%d (waited %s)",
+			head.ID, head.Priority, unit.Name, ep.Host, ep.Port, now.Sub(head.CreatedAt).Round(time.Second))
 		if wasIdle {
 			m.hookFirstActive(ctx)
 		}
@@ -847,15 +943,15 @@ func (m *Manager) nextAssignmentLocked() (*runner.Unit, *api.Reservation) {
 	if m.maxConcurrent > 0 && len(busy) >= m.maxConcurrent {
 		return nil, nil
 	}
-	// Admission order is the fairness rule: the EARLIEST queued waiter that has a free,
-	// compatible unit in a class below its cap wins. A waiter blocked only by its
-	// class cap keeps its position and is skipped (no head-of-line blocking across
-	// classes); since every freed slot goes to the oldest runnable waiter, no class
-	// can be starved by a stream of later arrivals of another class.
-	for _, r := range m.items {
-		if r.State != api.StateQueued {
-			continue
-		}
+	// Scheduling order is the fairness rule: the FIRST queued waiter in priority-aged
+	// order (virtual arrival = arrival + its class's aging offset; see priority.go)
+	// that has a free, compatible unit in a unit class below its cap wins. With every
+	// reservation in one priority class this is plain admission order. A waiter
+	// blocked only by its unit-class cap keeps its place and is skipped (no
+	// head-of-line blocking across unit classes); since every freed slot goes to the
+	// earliest runnable waiter by a FIXED key, nothing can be starved by a stream of
+	// later arrivals. Active reservations are never touched (no preemption).
+	for _, r := range m.queuedOrderLocked() {
 		best := -1
 		bestExtra := 0
 		for i := range m.units {
@@ -912,6 +1008,9 @@ func (m *Manager) removeLocked(id string) {
 	delete(m.want, id)
 	delete(m.typ, id)
 	delete(m.caps, id)
+	delete(m.progress, id)
+	delete(m.lastPos, id)
+	delete(m.capa.reqClass, id)
 }
 
 func (m *Manager) hookFirstActive(ctx context.Context) {

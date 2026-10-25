@@ -27,7 +27,10 @@
 // binding as capabilities and brokers access over a generic endpoint.
 package api
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // State is the lifecycle of a reservation.
 type State string
@@ -80,7 +83,57 @@ type ReserveRequest struct {
 	// capabilities"; it selects among best-fitting units (fewest extra
 	// capabilities) but never a pin-only unit — reaching one needs Unit or UnitType.
 	RequireCaps []string `json:"require_caps,omitempty"`
+	// Priority is the reservation's scheduling class (see PriorityMergeQueue,
+	// PriorityPRCI, PriorityDev). Empty or unknown means PriorityDev, so a client
+	// that predates priorities (or a human at a keyboard) lands in the dev class. A
+	// daemon that predates priorities ignores the field and stays plain FIFO.
+	Priority string `json:"priority,omitempty"`
 }
+
+// Scheduling classes, highest first. Classes only reorder the QUEUE: an active
+// reservation is never preempted, whatever arrives behind it. Lower classes AGE:
+// a reservation of class C is ordered as though it had arrived AgingOffset(C)
+// later than it did, so a higher class can overtake it only by arriving within
+// that window — after it, the older reservation is ahead of every newcomer and
+// cannot starve.
+const (
+	// PriorityMergeQueue: merge-critical CI — merge-queue (merge_group) runs and the
+	// post-merge run on main. Nothing ages ahead of it.
+	PriorityMergeQueue = "merge-queue"
+	// PriorityPRCI: ordinary PR CI (and periodic CI runs).
+	PriorityPRCI = "pr-ci"
+	// PriorityDev: interactive / agent development reservations (the default).
+	PriorityDev = "dev"
+)
+
+// PriorityClasses lists the scheduling classes, highest first.
+var PriorityClasses = []string{PriorityMergeQueue, PriorityPRCI, PriorityDev}
+
+// NormalizePriority maps a client-supplied class (or a common alias) to its
+// canonical name. Empty or unrecognized values map to PriorityDev; ok reports
+// whether the input was recognized (an empty input counts as recognized).
+func NormalizePriority(s string) (class string, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "merge-queue", "merge_queue", "mergequeue", "merge_group", "merge-group", "mq", "main", "post-merge":
+		return PriorityMergeQueue, true
+	case "pr-ci", "pr_ci", "prci", "ci", "pr", "pull_request", "periodic":
+		return PriorityPRCI, true
+	case "dev", "agent", "human", "":
+		return PriorityDev, true
+	default:
+		return PriorityDev, false
+	}
+}
+
+// Queue-blocking reasons reported in Reservation.Blocked.
+const (
+	// BlockedCordoned: the host is in maintenance mode; nothing activates until it is
+	// uncordoned. Waiting here makes no progress.
+	BlockedCordoned = "cordoned"
+	// BlockedNoUnit: no unit on the host can ever serve this request (e.g. the pinned
+	// unit or every unit of the requested type has been unplugged).
+	BlockedNoUnit = "no-unit"
+)
 
 // Endpoint is where the holder connects once active. The reservation flow is
 // transport-agnostic: the client reads Host/Port/User out of the response and
@@ -113,13 +166,36 @@ type Reservation struct {
 	// IdentitySource records how OwnerEmail was established: "tailscale" (verified),
 	// "asserted" (client-supplied, unverified), or "" (none). See
 	// ReserveRequest.IdentitySource.
-	IdentitySource string     `json:"identity_source,omitempty"`
-	State          State      `json:"state"`
-	Position       int        `json:"position"` // 0 == active/head, else waiters ahead
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"` // lease deadline
-	Endpoint       *Endpoint  `json:"endpoint,omitempty"`   // set once active
+	IdentitySource string `json:"identity_source,omitempty"`
+	State          State  `json:"state"`
+	// Position is 0 once active. While queued it is 1 + the number of queued
+	// reservations ahead of this one (in scheduling order) that compete for at least
+	// one of the same units, so 1 means "next in line for my units".
+	Position int `json:"position"`
+	// Priority is the effective scheduling class (see PriorityMergeQueue …). Always
+	// set by a priority-aware daemon, so its presence tells a client the daemon also
+	// reports the queue-progress fields below.
+	Priority string `json:"priority,omitempty"`
+	// EtaSeconds estimates, while queued, how long until this reservation activates:
+	// a list-scheduling simulation over the competing units' remaining hold times and
+	// the waiters ahead, using each unit type's recent mean hold. Nil when active or
+	// when no estimate is possible (see Blocked). An estimate only — a higher class
+	// arriving later can still move ahead (within its aging window).
+	EtaSeconds *int `json:"eta_seconds,omitempty"`
+	// ProgressAt is the last time the queue made progress for this waiter: its
+	// Position dropped, or one of the units it can use was freed / attached. Starts
+	// at CreatedAt. Never advances while the host is cordoned.
+	ProgressAt *time.Time `json:"progress_at,omitempty"`
+	// SinceProgressSeconds is now − ProgressAt by the DAEMON's clock (so a client
+	// with a skewed clock can still judge a stall). 0 when active.
+	SinceProgressSeconds int `json:"since_progress_seconds,omitempty"`
+	// Blocked names why a queued reservation cannot currently progress at all
+	// (BlockedCordoned, BlockedNoUnit), or "" when it is simply waiting its turn.
+	Blocked   string     `json:"blocked,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"` // lease deadline
+	Endpoint  *Endpoint  `json:"endpoint,omitempty"`   // set once active
 	// Unit is the unit this reservation landed on (set once active).
 	Unit string `json:"unit,omitempty"`
 	// UnitType mirrors the landed unit's type (informational).
@@ -193,6 +269,11 @@ type Status struct {
 	// "queued behind busy units".
 	MaxConcurrent         int            `json:"max_concurrent,omitempty"`
 	MaxConcurrentPerClass map[string]int `json:"max_concurrent_per_class,omitempty"`
+	// QueueByClass counts queued reservations per scheduling class (every class is
+	// present, possibly 0). PriorityAgingSeconds is each class's aging offset. Both
+	// are omitted by a daemon that predates priorities.
+	QueueByClass         map[string]int `json:"queue_by_class,omitempty"`
+	PriorityAgingSeconds map[string]int `json:"priority_aging_seconds,omitempty"`
 	// Cordoned is true when the host is in maintenance mode: no queued reservation
 	// will activate until it is uncordoned (existing active ones keep running).
 	Cordoned bool `json:"cordoned,omitempty"`
@@ -207,6 +288,46 @@ type Maintenance struct {
 	Active   int  `json:"active"`   // reservations still active (draining)
 	Queued   int  `json:"queued"`   // reservations waiting (held, not activating while cordoned)
 	Drained  bool `json:"drained"`  // cordoned && active == 0
+}
+
+// ClassQueue is one scheduling class's slice of a QueueSummary.
+type ClassQueue struct {
+	Class             string `json:"class"`
+	Queued            int    `json:"queued"`
+	OldestWaitSeconds int    `json:"oldest_wait_seconds"` // 0 when nothing is queued
+	AgingSeconds      int    `json:"aging_seconds"`       // ordered as if it arrived this much later
+}
+
+// TypeQueue is one unit type's slice of a QueueSummary: what a NEW reservation of
+// that type would face right now.
+type TypeQueue struct {
+	Type  string `json:"type"`
+	Units int    `json:"units"`
+	Free  int    `json:"free"`
+	// Queued counts queued reservations that could land on a unit of this type.
+	Queued int `json:"queued"`
+	// HoldEstimateSeconds is the recent mean time a reservation holds a unit of this
+	// type (the ETA model's input).
+	HoldEstimateSeconds int `json:"hold_estimate_seconds"`
+	// EtaNewSeconds estimates, per scheduling class, how long a reservation of that
+	// class for this type would wait if enqueued now. Omitted while cordoned.
+	EtaNewSeconds map[string]int `json:"eta_new_seconds,omitempty"`
+	// RetryAfterSeconds is the back-off hint for a DEV reservation: 0 means go ahead
+	// and reserve; otherwise check again after this long instead of enqueueing (see
+	// the README's back-off convention).
+	RetryAfterSeconds int `json:"retry_after_seconds"`
+}
+
+// QueueSummary is GET /queue: a cheap, reservation-free view of the host's queue
+// (depth per class, ETA per unit type) for clients deciding whether to enqueue.
+type QueueSummary struct {
+	Host        string       `json:"host"`
+	Workspace   string       `json:"workspace,omitempty"`
+	Time        time.Time    `json:"time"`
+	Cordoned    bool         `json:"cordoned,omitempty"`
+	QueueLength int          `json:"queue_length"`
+	Classes     []ClassQueue `json:"classes"`
+	Types       []TypeQueue  `json:"types"`
 }
 
 // Error is the JSON error envelope for non-2xx responses.
