@@ -47,12 +47,71 @@ func (m *Writer) Counter(name, help string, value float64, labels ...Label) {
 }
 
 func (m *Writer) sample(typ, name, help string, value float64, labels []Label) {
+	m.header(typ, name, help)
+	fmt.Fprintf(m.w, "%s%s %s\n", name, formatLabels(labels), formatValue(value))
+}
+
+func (m *Writer) header(typ, name, help string) {
 	if !m.family[name] {
 		m.family[name] = true
 		fmt.Fprintf(m.w, "# HELP %s %s\n", name, escapeHelp(help))
 		fmt.Fprintf(m.w, "# TYPE %s %s\n", name, typ)
 	}
-	fmt.Fprintf(m.w, "%s%s %s\n", name, formatLabels(labels), formatValue(value))
+}
+
+// Histogram emits one histogram series (cumulative _bucket{le=…} samples ending in
+// le="+Inf", then _sum and _count) of a histogram metric family.
+func (m *Writer) Histogram(name, help string, h Histogram, labels ...Label) {
+	m.header("histogram", name, help)
+	var cum uint64
+	for i, b := range h.Bounds {
+		if i < len(h.Counts) {
+			cum += h.Counts[i]
+		}
+		ls := append(append([]Label(nil), labels...), Label{Name: "le", Value: formatValue(b)})
+		fmt.Fprintf(m.w, "%s_bucket%s %d\n", name, formatLabels(ls), cum)
+	}
+	ls := append(append([]Label(nil), labels...), Label{Name: "le", Value: "+Inf"})
+	fmt.Fprintf(m.w, "%s_bucket%s %d\n", name, formatLabels(ls), h.Count)
+	fmt.Fprintf(m.w, "%s_sum%s %s\n", name, formatLabels(labels), formatValue(h.Sum))
+	fmt.Fprintf(m.w, "%s_count%s %d\n", name, formatLabels(labels), h.Count)
+}
+
+// Histogram is a fixed-bucket histogram: Counts[i] is the number of observations
+// v with Bounds[i-1] < v <= Bounds[i] (non-cumulative; the writer accumulates), and
+// observations above the last bound are counted only in Count. Not safe for
+// concurrent use; guard it with the owner's lock.
+type Histogram struct {
+	Bounds []float64
+	Counts []uint64
+	Sum    float64
+	Count  uint64
+}
+
+// NewHistogram makes an empty histogram over ascending upper bounds.
+func NewHistogram(bounds []float64) *Histogram {
+	return &Histogram{Bounds: append([]float64(nil), bounds...), Counts: make([]uint64, len(bounds))}
+}
+
+// Observe records one value.
+func (h *Histogram) Observe(v float64) {
+	for i, b := range h.Bounds {
+		if v <= b {
+			h.Counts[i]++
+			break
+		}
+	}
+	h.Sum += v
+	h.Count++
+}
+
+// Clone returns an independent copy (for a snapshot taken under a lock).
+func (h *Histogram) Clone() Histogram {
+	return Histogram{
+		Bounds: append([]float64(nil), h.Bounds...),
+		Counts: append([]uint64(nil), h.Counts...),
+		Sum:    h.Sum, Count: h.Count,
+	}
 }
 
 func formatValue(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }

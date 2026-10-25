@@ -41,7 +41,10 @@ every unit of that type match the tests that need it, with no per-test change.
 
 ## Placement
 
-`engine` runs a FIFO admission queue. Each unit has a single active slot. A waiter
+`engine` runs a priority-aged admission queue (FIFO within a priority class; lower
+classes are ordered at arrival + their aging offset, see `engine/priority.go` and the
+README's "Priority classes"; nothing is ever preempted). Each unit has a single
+active slot. A waiter
 is admitted to the *best-fitting* free unit that can serve it. `unitServesLocked`
 decides eligibility:
 

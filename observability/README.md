@@ -46,13 +46,36 @@ slicing.
 | `hitl_lease_expirations_total` | counter | Reservations reaped for a lapsed lease. |
 | `hitl_start_failures_total` | counter | Environment start failures during reconcile. |
 | `hitl_host_load1` / `hitl_host_memory_*` / `hitl_host_temperature_celsius` | gauge | Host resources. |
+| `hitl_queue_depth_class{class}` | gauge | Queued reservations per priority class (`merge-queue`, `pr-ci`, `dev`). |
+| `hitl_queue_oldest_wait_seconds{class}` | gauge | Age of the oldest queued reservation per class (0 when none). |
+| `hitl_reservation_requests_total{prio_class,caps_class}` | counter | Reservations requested. |
+| `hitl_reservation_abandoned_total{prio_class,caps_class}` | counter | Reservations that left the queue without activating (client gave up, lease lapsed, unit evicted). |
+| `hitl_reservation_wait_seconds{prio_class,caps_class,result}` | histogram | Request→activation (`result=activated`) or request→abandon (`result=abandoned`) time. |
+| `hitl_reservation_hold_seconds{prio_class,caps_class,owner_kind}` | histogram | Activation→release time; `owner_kind` = `ci` / `agent` / `human`. |
+| `hitl_unit_busy_seconds_total{unit,unit_type,caps_class,prio_class,outcome}` | counter | Seconds a unit was held, credited when the hold ends; `outcome` = `released` / `expired` / `cancelled` / `start_failed`. |
+| `hitl_unit_available_seconds_total{unit,unit_type,caps_class}` | counter | Seconds a unit was present and reservable (host not cordoned), busy or idle. |
+
+**caps_class.** A unit's is its type alias (`--caps-class-alias`, default
+`esp32c6=c6,esp32c3=c3,led-mapper-pi=pi`) plus `-la` when it has a logic-analyzer tap
+capability. A request's is the alias of the type it targets (pinned unit's type,
+`unit_type`, or the one type all its candidate units share; `mixed` / `none`
+otherwise) plus `-la` only if it *requires* a logic analyzer — so `c6` demand is
+served by `c6` and `c6-la` units, `c6-la` demand only by `c6-la` units.
+
+Capacity planning per caps class (all counters, so they sum across hosts):
+utilization = `sum(rate(hitl_unit_busy_seconds_total)) / sum(rate(hitl_unit_available_seconds_total))`;
+offered load in boards = `sum(rate(hitl_reservation_requests_total)) * (sum(rate(hitl_reservation_hold_seconds_sum)) / sum(rate(hitl_reservation_hold_seconds_count)))`;
+unserved demand = `sum(rate(hitl_reservation_abandoned_total))`. Busy seconds land
+when a hold ends, so use windows well above a typical hold (≥ 1 h).
 
 Every series is labeled `host` and `workspace`; `hitl_unit_busy` adds `unit` and
 `unit_type`.
 
 Worth alerting on: nonzero `rate(hitl_start_failures_total)` (a unit that won't come
 up), sustained `rate(hitl_lease_expirations_total)` (clients dying mid-session), or
-`hitl_queue_depth` staying high (fleet under-provisioned for load).
+`hitl_queue_depth` staying high (fleet under-provisioned for load), and
+`hitl_queue_oldest_wait_seconds{class="merge-queue"}` climbing (merge-critical CI
+starved for boards).
 
 ## Collector (Grafana Alloy on each rig)
 

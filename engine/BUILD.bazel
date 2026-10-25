@@ -2,11 +2,16 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "engine",
-    srcs = ["engine.go"],
+    srcs = [
+        "capacity.go",
+        "engine.go",
+        "priority.go",
+    ],
     importpath = "github.com/fughilli/hitl-reserve/engine",
     visibility = ["//visibility:public"],
     deps = [
         "//api",
+        "//metrics",
         "//runner",
     ],
 )
@@ -14,9 +19,11 @@ go_library(
 go_test(
     name = "engine_test",
     srcs = [
+        "capacity_test.go",
         "class_cap_test.go",
         "engine_test.go",
         "maintenance_test.go",
+        "priority_test.go",
         "provision_test.go",
     ],
     embed = [":engine"],

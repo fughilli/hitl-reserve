@@ -72,6 +72,77 @@ func (c *classCapFlag) Set(v string) error {
 	return nil
 }
 
+// agingFlag collects repeatable/comma-separated CLASS=DURATION priority-aging offsets.
+type agingFlag struct{ m map[string]time.Duration }
+
+func (a *agingFlag) String() string {
+	if a == nil || len(a.m) == 0 {
+		return ""
+	}
+	var parts []string
+	for k, v := range a.m {
+		parts = append(parts, k+"="+v.String())
+	}
+	sortStrings(parts)
+	return strings.Join(parts, ",")
+}
+
+func (a *agingFlag) Set(v string) error {
+	if a.m == nil {
+		a.m = map[string]time.Duration{}
+	}
+	for _, kv := range strings.Split(v, ",") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		k, d, ok := strings.Cut(kv, "=")
+		class, known := api.NormalizePriority(k)
+		dur, err := time.ParseDuration(strings.TrimSpace(d))
+		if !ok || !known || strings.TrimSpace(k) == "" || err != nil || dur < 0 {
+			return fmt.Errorf("want CLASS=DURATION (class one of %v, e.g. dev=60m), got %q", api.PriorityClasses, kv)
+		}
+		if class == api.PriorityMergeQueue && dur != 0 {
+			return fmt.Errorf("%s is the top class; its aging offset is always 0", class)
+		}
+		a.m[class] = dur
+	}
+	return nil
+}
+
+// classCapAliasFlag collects repeatable/comma-separated TYPE=NAME aliases.
+type classCapAliasFlag struct{ m map[string]string }
+
+func (a *classCapAliasFlag) String() string {
+	if a == nil {
+		return ""
+	}
+	var parts []string
+	for k, v := range a.m {
+		parts = append(parts, k+"="+v)
+	}
+	sortStrings(parts)
+	return strings.Join(parts, ",")
+}
+
+func (a *classCapAliasFlag) Set(v string) error {
+	if a.m == nil {
+		a.m = map[string]string{}
+	}
+	for _, kv := range strings.Split(v, ",") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		k, n, ok := strings.Cut(kv, "=")
+		if !ok || strings.TrimSpace(k) == "" || strings.TrimSpace(n) == "" {
+			return fmt.Errorf("want TYPE=NAME, got %q", kv)
+		}
+		a.m[strings.TrimSpace(k)] = strings.TrimSpace(n)
+	}
+	return nil
+}
+
 // stringList collects a repeatable string flag.
 type stringList []string
 
@@ -102,6 +173,11 @@ func main() {
 	maxConcurrent := flag.Int("max-concurrent", 0, "cap concurrently-active reservations on this host regardless of unit count (0 = unlimited); protects a weak host or a shared bus/radio from N-wide load. Surplus reservations queue and start as active ones release.")
 	var classCaps classCapFlag
 	flag.Var(&classCaps, "max-concurrent-class", "per-unit-class concurrency cap 'TYPE=N' (repeatable, or comma-separated), keyed by the unit type (e.g. esp32c6=2,led-mapper-pi=2). Layered under --max-concurrent: a class at its cap never idles another class's free units, and admission stays FIFO (within a class, strictly in order). Unlisted classes are bounded only by --max-concurrent.")
+	var aging agingFlag
+	flag.Var(&aging, "priority-aging", "per-class priority aging offset 'CLASS=DURATION' (repeatable, or comma-separated; classes pr-ci, dev). A queued reservation is ordered as though it arrived its class's offset later, so a higher class overtakes it only by arriving within that window — the bound on how long CI can keep a dev reservation waiting. Default pr-ci=20m,dev=60m. Active reservations are never preempted.")
+	var capsAliases classCapAliasFlag
+	flag.Var(&capsAliases, "caps-class-alias", "unit-type alias for the capacity metrics' caps_class label 'TYPE=NAME' (repeatable/comma-separated; defaults esp32c6=c6,esp32c3=c3,led-mapper-pi=pi). A unit with a logic-analyzer tap gets NAME-la.")
+	defaultHold := flag.Duration("eta-default-hold", engine.DefaultHold, "hold-time estimate for a unit type with no completed reservation yet (the ETA model's seed)")
 	wifiIface := flag.String("wifi-iface", "", "the host's provisioning-AP interface (e.g. wlan0); enables GET /reservation/{id}/wifi, the AP's per-station stats (`iw dev IFACE station dump`) for the stations a reservation owns. Empty = endpoint disabled.")
 	wifiLeases := flag.String("wifi-leases", "", "dnsmasq leases file for --wifi-iface (maps a DUT's IP to its current station MAC); default /var/lib/NetworkManager/dnsmasq-IFACE.leases")
 	iwBin := flag.String("iw", "iw", "iw binary (for --wifi-iface)")
@@ -211,6 +287,9 @@ func main() {
 		engine.WithMaxConcurrent(*maxConcurrent),
 		engine.WithMaxConcurrentPerClass(classCaps.m),
 		engine.WithStateDir(*stateDir),
+		engine.WithPriorityAging(aging.m),
+		engine.WithDefaultHold(*defaultHold),
+		engine.WithCapsClassAliases(capsAliases.m),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -364,6 +443,12 @@ func routes(ctx context.Context, mgr *engine.Manager, reg *shared.Registry, work
 		writeJSON(w, http.StatusOK, mgr.Status())
 	})
 
+	// Cheap, reservation-free queue overview (depth per class, ETA per unit type,
+	// a dev back-off hint) so clients can decide whether to enqueue at all.
+	mux.HandleFunc("GET /queue", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, mgr.QueueSummary())
+	})
+
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		writeMetrics(w, mgr.Metrics(), metrics.ReadHost())
@@ -409,7 +494,13 @@ func routes(ctx context.Context, mgr *engine.Manager, reg *shared.Registry, work
 	})
 
 	mux.HandleFunc("POST /reservation/{id}/release", func(w http.ResponseWriter, r *http.Request) {
-		if err := mgr.Release(ctx, r.PathValue("id"), "released by holder"); err != nil {
+		// ?outcome=cancelled marks a hold that ended because its job was cancelled
+		// (accounted separately from a normal release in the capacity metrics).
+		reason := "released by holder"
+		if r.URL.Query().Get("outcome") == engine.OutcomeCancelled {
+			reason = engine.ReasonCancelled
+		}
+		if err := mgr.Release(ctx, r.PathValue("id"), reason); err != nil {
 			writeErr(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -626,6 +717,43 @@ func writeMetrics(w io.Writer, snap engine.MetricsSnapshot, host metrics.HostSta
 		)
 		mw.Gauge("hitl_reservation", "1 for each currently-active reservation (labelled by id/owner/unit).", 1, labels...)
 		mw.Gauge("hitl_reservation_age_seconds", "Seconds since this reservation became active.", r.AgeSecs, labels...)
+	}
+
+	// Priority classes: queue depth / oldest wait per class, and the wait-time
+	// histogram of reservations that activated (plus those that gave up queued).
+	for _, c := range snap.Classes {
+		cl := l(metrics.Label{Name: "class", Value: c.Class})
+		mw.Gauge("hitl_queue_depth_class", "Reservations queued, per priority class.", float64(c.Queued), cl...)
+		mw.Gauge("hitl_queue_oldest_wait_seconds", "Age of the oldest queued reservation, per priority class (0 when none).", c.OldestWaitSeconds, cl...)
+	}
+
+	// Capacity accounting (demand vs supply per caps class; see engine/capacity.go
+	// and docs/metrics.md). All counters/histograms, so they sum across hosts.
+	cs := snap.Capacity
+	for _, u := range cs.Units {
+		mw.Counter("hitl_unit_available_seconds_total", "Seconds the unit was present and reservable (host not cordoned), busy or idle.", u.AvailableSeconds,
+			l(metrics.Label{Name: "unit", Value: u.Unit}, metrics.Label{Name: "unit_type", Value: u.Type}, metrics.Label{Name: "caps_class", Value: u.CapsClass})...)
+	}
+	for _, b := range cs.Busy {
+		mw.Counter("hitl_unit_busy_seconds_total", "Seconds the unit was held by an active reservation, credited when the hold ends (outcome: released/expired/cancelled/start_failed).", b.Seconds,
+			l(metrics.Label{Name: "unit", Value: b.Unit}, metrics.Label{Name: "unit_type", Value: b.Type}, metrics.Label{Name: "caps_class", Value: b.CapsClass},
+				metrics.Label{Name: "prio_class", Value: b.Prio}, metrics.Label{Name: "outcome", Value: b.Outcome})...)
+	}
+	for _, r := range cs.Requests {
+		mw.Counter("hitl_reservation_requests_total", "Reservations requested, by priority class and the request's caps class.", float64(r.Requests),
+			l(metrics.Label{Name: "prio_class", Value: r.Prio}, metrics.Label{Name: "caps_class", Value: r.CapsClass})...)
+	}
+	for _, r := range cs.Requests {
+		mw.Counter("hitl_reservation_abandoned_total", "Reservations that left the queue without activating (client gave up, lease expired or unit evicted while queued).", float64(r.Abandoned),
+			l(metrics.Label{Name: "prio_class", Value: r.Prio}, metrics.Label{Name: "caps_class", Value: r.CapsClass})...)
+	}
+	for _, w := range cs.Waits {
+		mw.Histogram("hitl_reservation_wait_seconds", "Request-to-activation time (result=activated), or request-to-abandon time for reservations that never activated (result=abandoned).", w.Hist,
+			l(metrics.Label{Name: "prio_class", Value: w.Prio}, metrics.Label{Name: "caps_class", Value: w.CapsClass}, metrics.Label{Name: "result", Value: w.Result})...)
+	}
+	for _, h := range cs.Holds {
+		mw.Histogram("hitl_reservation_hold_seconds", "Activation-to-release time of reservations, by priority class, request caps class and owner kind (ci/agent/human).", h.Hist,
+			l(metrics.Label{Name: "prio_class", Value: h.Prio}, metrics.Label{Name: "caps_class", Value: h.CapsClass}, metrics.Label{Name: "owner_kind", Value: h.OwnerKind})...)
 	}
 
 	mw.Counter("hitl_reservations_total", "Reservations enqueued since start.", float64(snap.Reservations), l()...)
