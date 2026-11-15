@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // levels expands a wave into one level per sample.
@@ -229,5 +230,27 @@ esac
 		res.Channels[0].Channel != "D6" || len(res.Channels[0].Pixels) != 2 ||
 		res.Channels[1].Channel != "D7" || len(res.Channels[1].Pixels) != 1 || res.Channels[1].Pixels[0].B != 0xff {
 		t.Fatalf("two-channel capture %s", resp)
+	}
+}
+
+// A silent line: sigrok-cli waits on its trigger forever. The capture's own
+// deadline must end it with the "trigger never fired" diagnosis, well before a
+// client's HTTP timeout, instead of hanging.
+func TestCaptureSilentLineTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "sigrok-cli")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b := New(Config{Driver: "fx2lafw", SigrokCLI: script, CaptureTimeout: 200 * time.Millisecond,
+		Map: map[string]UnitMap{"c6-a": {Channels: []string{"D6"}}}})
+
+	start := time.Now()
+	resp, status, _ := b.Access(context.Background(), "c6-a", []byte(`{"op":"capture","samples":1000}`))
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("capture took %s; its own deadline should have ended it", d)
+	}
+	if status == 200 || !strings.Contains(string(resp), "never fired") {
+		t.Fatalf("want a trigger-never-fired error, got %d %s", status, resp)
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fughilli/hitl-reserve/api"
 )
@@ -59,6 +60,12 @@ type Config struct {
 	TimingSampleRate string
 	// TimingMaxMs caps one timing capture's window (default 60000).
 	TimingMaxMs int
+	// CaptureTimeout bounds how long a triggered capture waits for its trigger
+	// (default 20s), on top of the capture's own sample window. sigrok-cli has no
+	// trigger timeout of its own: on a silent line it waits forever, so without
+	// this the client's HTTP timeout (90s in the splanc harnesses) fired first and
+	// the run died with no diagnosis. Kept well under that client timeout.
+	CaptureTimeout time.Duration
 	// Map is the initial unit→channel map, keyed by unit name; key "" is the
 	// default/fallback. Bindings from the catalog overlay this.
 	Map map[string]UnitMap
@@ -100,6 +107,9 @@ func New(cfg Config) *Broker {
 	}
 	if cfg.TimingMaxMs <= 0 {
 		cfg.TimingMaxMs = 60000
+	}
+	if cfg.CaptureTimeout <= 0 {
+		cfg.CaptureTimeout = 20 * time.Second
 	}
 	if cfg.Map == nil {
 		cfg.Map = map[string]UnitMap{}
@@ -329,8 +339,7 @@ func (b *Broker) capture(ctx context.Context, req CaptureRequest) (*CaptureResul
 		return nil, err
 	}
 	if fi, err := os.Stat(srPath); err != nil || fi.Size() == 0 {
-		return nil, fmt.Errorf("no data captured on %s (trigger %s=r never fired — is the unit driving this line? wrong channel?)",
-			strings.Join(m.Channels, ","), m.Channels[0])
+		return nil, errNoTrigger(m)
 	}
 	res := &CaptureResult{Unit: req.Unit, Protocol: string(m.Protocol), SampleRate: b.SampleRateHz()}
 	if m.Protocol == ProtocolSPIRaw {
@@ -436,10 +445,26 @@ func (b *Broker) captureToSR(ctx context.Context, srPath string, m UnitMap, samp
 		"--samples", strconv.Itoa(samples),
 		"-o", srPath,
 	}
-	if out, err := runCmd(ctx, b.cfg.SigrokCLI, args...); err != nil {
+	// Own deadline: the trigger wait (CaptureTimeout) plus the sample window.
+	window := time.Duration(0)
+	if hz := b.SampleRateHz(); hz > 0 {
+		window = time.Duration(float64(samples) / float64(hz) * float64(time.Second))
+	}
+	cctx, cancel := context.WithTimeout(ctx, b.cfg.CaptureTimeout+window)
+	defer cancel()
+	if out, err := runCmd(cctx, b.cfg.SigrokCLI, args...); err != nil {
+		if ctx.Err() == nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("%w after %s", errNoTrigger(m), b.cfg.CaptureTimeout+window)
+		}
 		return fmt.Errorf("sigrok capture: %w: %s", err, out)
 	}
 	return nil
+}
+
+// errNoTrigger is the triggered capture's "the line never moved" diagnosis.
+func errNoTrigger(m UnitMap) error {
+	return fmt.Errorf("no data captured on %s (trigger %s=r never fired — is the unit driving this line? wrong channel?)",
+		strings.Join(m.Channels, ","), m.Channels[0])
 }
 
 // decodeSR runs the protocol decoder over a captured .sr and parses the pixels.
@@ -471,7 +496,11 @@ func (b *Broker) decodeSRBytes(ctx context.Context, srPath string, m UnitMap) ([
 }
 
 func runCmd(ctx context.Context, bin string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	// After a cancel kills the process, don't wait on a child that still holds
+	// the output pipe open.
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
