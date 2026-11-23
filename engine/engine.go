@@ -901,11 +901,18 @@ func (m *Manager) reconcileLocked(ctx context.Context) {
 			continue
 		}
 		now := m.now()
-		exp := now.Add(m.lease)
 		m.observeWaitLocked(head, ResultActivated, now.Sub(head.CreatedAt))
 		head.State = api.StateActive
 		head.StartedAt = &now
-		head.ExpiresAt = &exp
+		// Keep the heartbeat-driven expiry: activation is not a sign of life. Granting
+		// a fresh lease here let a waiter whose client died while queued (a cancelled
+		// CI job) hold the unit for one more full lease with nobody on it — on the
+		// splanc fleet 99 such holds burned ~50 unit-hours in a week. A live client
+		// heartbeats while queued, so its expiry is already recent.
+		if head.ExpiresAt == nil {
+			exp := now.Add(m.lease)
+			head.ExpiresAt = &exp
+		}
 		head.Endpoint = ep
 		head.Unit = unit.Name
 		head.UnitType = unit.Type
@@ -951,7 +958,15 @@ func (m *Manager) nextAssignmentLocked() (*runner.Unit, *api.Reservation) {
 	// head-of-line blocking across unit classes); since every freed slot goes to the
 	// earliest runnable waiter by a FIXED key, nothing can be starved by a stream of
 	// later arrivals. Active reservations are never touched (no preemption).
+	now := m.now()
 	for _, r := range m.queuedOrderLocked() {
+		// A waiter whose lease already lapsed has no client behind it: never start an
+		// environment for it (the reaper releases it). Without this a reap sweep
+		// promoted each dead waiter onto the unit the previous one freed, started a
+		// container for nobody, then tore it down seconds later.
+		if r.ExpiresAt != nil && now.After(*r.ExpiresAt) {
+			continue
+		}
 		best := -1
 		bestExtra := 0
 		for i := range m.units {
